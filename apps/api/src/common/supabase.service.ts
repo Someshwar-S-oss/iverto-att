@@ -68,7 +68,15 @@ export class SupabaseService {
   // ── Storage (all buckets private) ─────────────────────────────────────────
 
   async upload(bucket: string, path: string, body: Buffer, contentType: string) {
-    const { error } = await this.admin.storage.from(bucket).upload(path, body, { contentType, upsert: false });
+    const put = () => this.admin.storage.from(bucket).upload(path, body, { contentType, upsert: false });
+    let { error } = await put();
+    // Fresh Supabase projects have no buckets; create it (private) on first write.
+    if (error && /bucket not found/i.test(error.message)) {
+      const created = await this.admin.storage.createBucket(bucket, { public: false });
+      if (created.error && !/already exists/i.test(created.error.message)) throw created.error;
+      this.logger.log(`Created storage bucket ${bucket}`);
+      ({ error } = await put());
+    }
     if (error) throw error;
   }
 

@@ -26,17 +26,6 @@ export function useCommandPalette() {
   return [open, setOpen] as const;
 }
 
-export function SearchButton({ onClick }: { onClick: () => void }) {
-  return (
-    <button type="button" onClick={onClick} aria-label="Search (Ctrl K)"
-      className="group flex items-center gap-2 rounded-xl border border-line bg-surface-panel px-3 py-1.5 text-sm text-fg-subtle shadow-soft transition hover:border-line-strong hover:text-fg">
-      <Search size={15} />
-      <span className="hidden md:inline">Search…</span>
-      <span className="hidden md:inline"><Kbd>{SHORTCUT}</Kbd></span>
-    </button>
-  );
-}
-
 /** "Rao" in "Asha Rao" → Asha <mark>Rao</mark>. */
 function Highlight({ text, q }: { text: string; q: string }) {
   const i = q ? text.toLowerCase().indexOf(q.toLowerCase()) : -1;

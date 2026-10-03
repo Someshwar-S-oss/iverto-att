@@ -46,7 +46,8 @@ function ExportPanel({ onQueued }: { onQueued: () => void }) {
     type: def!.type,
     format,
     filters: {
-      dateFrom: f.dateFrom, dateTo: f.dateTo,
+      // One-day reports (daily summary) take a single date: the "To" field.
+      dateFrom: def!.maxDays === 1 ? f.dateTo : f.dateFrom, dateTo: f.dateTo,
       ...(f.siteId && { siteIds: [f.siteId] }), ...(f.departmentId && { departmentIds: [f.departmentId] }), ...(f.employeeId && { employeeIds: [f.employeeId] }),
       ...(has('groupBy') && { groupBy: f.groupBy }),
     },
@@ -75,10 +76,14 @@ function ExportPanel({ onQueued }: { onQueued: () => void }) {
       {def && (
         <Card className="h-fit space-y-4">
           <h2 className="text-lg font-bold text-fg">{def.title}</h2>
-          <div className="grid grid-cols-2 gap-3">
-            <DateInput label="From" value={f.dateFrom} onChange={(e) => set('dateFrom')(e.target.value)} />
-            <DateInput label="To" value={f.dateTo} onChange={(e) => set('dateTo')(e.target.value)} />
-          </div>
+          {def.maxDays === 1 ? (
+            <DateInput label="Date" value={f.dateTo} onChange={(e) => set('dateTo')(e.target.value)} />
+          ) : (
+            <div className="grid grid-cols-2 gap-3">
+              <DateInput label="From" value={f.dateFrom} onChange={(e) => set('dateFrom')(e.target.value)} />
+              <DateInput label="To" value={f.dateTo} onChange={(e) => set('dateTo')(e.target.value)} />
+            </div>
+          )}
           {isManager(me) && has('siteIds') && <SitePicker placeholder="All locations" value={f.siteId} onChange={set('siteId')} />}
           {isManager(me) && has('departmentIds') && <Pick label="Department" placeholder="All departments" options={departments.map((d) => ({ value: d.id, label: d.name }))} value={f.departmentId} onChange={set('departmentId')} />}
           {isManager(me) && has('employeeIds') && <EmployeePicker label="Employee (optional)" value={f.employeeId} onChange={set('employeeId')} />}

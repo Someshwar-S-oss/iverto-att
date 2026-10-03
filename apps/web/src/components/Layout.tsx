@@ -1,6 +1,6 @@
-import { AppShell, type NavGroup } from '@iverto-org/core-ui';
+import { AppShell, Kbd, type NavGroup } from '@iverto-org/core-ui';
 import {
-  Activity, BarChart3, CalendarDays, CalendarRange, ClipboardCheck, Clock, Cpu, Home, LogOut, Plane, ScanFace,
+  Activity, BarChart3, CalendarDays, CalendarRange, ClipboardCheck, Clock, Cpu, Home, LogOut, Plane, ScanFace, Search,
   Settings, Sun, TableProperties, Users, Building2, ArrowLeftRight, Repeat,
 } from 'lucide-react';
 import { Outlet, useLocation, useNavigate } from 'react-router';
@@ -8,9 +8,11 @@ import { isHr, isManager, useAuth, useMe } from '../lib/auth';
 import { clearCache } from '../lib/api';
 import { ROLE_LABEL } from '../lib/format';
 import { useLiveSocket } from '../lib/live';
-import { CommandPalette, SearchButton, useCommandPalette } from './CommandPalette';
+import { CommandPalette, SHORTCUT, useCommandPalette } from './CommandPalette';
 
 const icon = (I: typeof Home) => <I size={19} />;
+/** Fake href for the Search nav row; never a real route. */
+const SEARCH = '#search';
 
 export function Layout() {
   const me = useMe();
@@ -79,14 +81,14 @@ export function Layout() {
 
   return (
     <AppShell
-      navGroups={groups}
+      navGroups={[{ label: '', items: [{ label: 'Search', icon: icon(Search), href: SEARCH, badge: <Kbd>{SHORTCUT}</Kbd> }] }, ...groups]}
       activeHref={pathname}
       onNavigate={(item, e) => {
         e.preventDefault();
-        navigate(item.href);
+        if (item.href === SEARCH) setSearching(true);
+        else navigate(item.href);
       }}
       user={{ name: me.name, role: ROLE_LABEL[me.role] }}
-      headerAction={<SearchButton onClick={() => setSearching(true)} />}
       banner={
         override ? (
           <div className="flex items-center justify-center gap-3 bg-warning-soft px-4 py-2 text-sm text-warning-fg">

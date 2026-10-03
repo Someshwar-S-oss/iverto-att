@@ -1,0 +1,7 @@
+{
+  "name": "iverto-att",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ]
+}

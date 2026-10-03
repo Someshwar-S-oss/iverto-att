@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Iverto Attendance</title>
+    <!-- core-ui themeInitScript(): applies the saved theme before paint so dark-mode users see no light flash. -->
+    <script>(function(){try{var p=localStorage.getItem("iverto-theme");var d=p==='dark'||(p==='system'&&matchMedia('(prefers-color-scheme: dark)').matches);var t=d?'dark':'light';document.documentElement.dataset.theme=t;document.documentElement.style.colorScheme=t;}catch(e){}})();</script>
+    <!-- A startup crash (e.g. a missing .env) throws before React mounts, leaving a blank page with only this CSS background. Show the error instead. -->
+    <script>window.addEventListener('error',function(e){if(!document.getElementById('root').firstChild){document.getElementById('root').innerHTML='<pre style="padding:2rem;font-family:monospace;white-space:pre-wrap;color:#f66">'+(e.error&&e.error.message||e.message)+'</pre>';}});</script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

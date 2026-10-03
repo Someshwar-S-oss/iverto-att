@@ -1,0 +1,648 @@
+generator client {
+  provider        = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// Enum-like columns are plain strings with CHECK constraints in
+// post-init/002-constraints.sql, matching the hostel convention.
+
+// ── Org ─────────────────────────────────────────────────────────────────────
+
+model Tenant {
+  id              String    @id @default(cuid())
+  name            String
+  slug            String    @unique
+  status          String    @default("PROVISIONING") // PROVISIONING | ACTIVE | SUSPENDED
+  suspendedAt     DateTime? @map("suspended_at")
+  suspendedReason String?   @map("suspended_reason")
+  /// branding, dayBoundary, storePunchPhotos, punchPhotoRetentionDays, reportRetentionDays, adminUserId, …
+  settings        Json      @default("{}")
+  createdBy       String?   @map("created_by")
+  createdAt       DateTime  @default(now()) @map("created_at")
+
+  @@map("tenants")
+}
+
+model Site {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  name              String
+  address           String?
+  timezone          String   @default("Asia/Kolkata")
+  holidayCalendarId String?  @map("holiday_calendar_id")
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  employees Employee[]
+  devices   Device[]
+
+  @@index([tenantId])
+  @@map("sites")
+}
+
+model Department {
+  id             String   @id @default(cuid())
+  tenantId       String   @map("tenant_id")
+  name           String
+  code           String?
+  headEmployeeId String?  @map("head_employee_id")
+  policyId       String?  @map("policy_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  employees Employee[]
+
+  @@unique([tenantId, name])
+  @@map("departments")
+}
+
+model Project {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  name      String
+  code      String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  members EmployeeProject[]
+
+  @@unique([tenantId, name])
+  @@map("projects")
+}
+
+model EmployeeProject {
+  id         String    @id @default(cuid())
+  tenantId   String    @map("tenant_id")
+  employeeId String    @map("employee_id")
+  projectId  String    @map("project_id")
+  from       DateTime  @db.Date
+  to         DateTime? @db.Date
+
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  project  Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId])
+  @@index([employeeId])
+  @@map("employee_projects")
+}
+
+model HolidayCalendar {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  holidays Holiday[]
+
+  @@map("holiday_calendars")
+}
+
+model Holiday {
+  id         String          @id @default(cuid())
+  tenantId   String          @map("tenant_id")
+  calendarId String          @map("calendar_id")
+  calendar   HolidayCalendar @relation(fields: [calendarId], references: [id], onDelete: Cascade)
+  date       DateTime        @db.Date
+  name       String
+
+  @@unique([calendarId, date])
+  @@map("holidays")
+}
+
+/// Thresholds for the attendance engine (§6.2). One default per tenant, optional per department.
+model AttendancePolicy {
+  id                  String   @id @default(cuid())
+  tenantId            String   @map("tenant_id")
+  name                String
+  isDefault           Boolean  @default(false) @map("is_default")
+  graceInMinutes      Int      @default(10) @map("grace_in_minutes")
+  graceOutMinutes     Int      @default(10) @map("grace_out_minutes")
+  /// Percent of required minutes.
+  halfDayMinPercent   Int      @default(50) @map("half_day_min_percent")
+  fullDayMinPercent   Int      @default(90) @map("full_day_min_percent")
+  earlyWindowMinutes  Int      @default(180) @map("early_window_minutes")
+  lateWindowMinutes   Int      @default(360) @map("late_window_minutes")
+  duplicatePunchSeconds Int    @default(60) @map("duplicate_punch_seconds")
+  minSessionMinutes   Int      @default(5) @map("min_session_minutes")
+  absentAfterMinutes  Int      @default(120) @map("absent_after_minutes")
+  missedOutCredit     String   @default("NONE") @map("missed_out_credit") // NONE | UNTIL_SHIFT_END
+  overtimeEnabled     Boolean  @default(false) @map("overtime_enabled")
+  overtimeMinMinutes  Int      @default(30) @map("overtime_min_minutes")
+  breakDeduction      String   @default("SHIFT_BREAK") @map("break_deduction") // SHIFT_BREAK | NONE
+  roundingMinutes     Int      @default(0) @map("rounding_minutes")
+  minRestHours        Int      @default(8) @map("min_rest_hours")
+  maxWeeklyHours      Int      @default(60) @map("max_weekly_hours")
+  createdAt           DateTime @default(now()) @map("created_at")
+  updatedAt           DateTime @updatedAt @map("updated_at")
+
+  @@map("attendance_policies")
+}
+
+// ── People & access ─────────────────────────────────────────────────────────
+
+/// One Supabase auth user. Platform admins have no tenant.
+model UserProfile {
+  userId             String   @id @map("user_id")
+  tenantId           String?  @map("tenant_id")
+  employeeId         String?  @unique @map("employee_id")
+  role               String   // ADMIN | HR | MANAGER | EMPLOYEE | PLATFORM_ADMIN
+  displayName        String   @map("display_name")
+  email              String
+  siteIds            String[] @default([]) @map("site_ids")
+  status             String   @default("ACTIVE") // ACTIVE | DISABLED | EXITED
+  mustChangePassword Boolean  @default(true) @map("must_change_password")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId])
+  @@map("user_profiles")
+}
+
+model Employee {
+  id                 String    @id @default(cuid())
+  tenantId           String    @map("tenant_id")
+  siteId             String    @map("site_id")
+  departmentId       String?   @map("department_id")
+  managerId          String?   @map("manager_id")
+  employeeCode       String    @map("employee_code")
+  fullName           String    @map("full_name")
+  email              String?
+  phone              String?
+  designation        String?
+  employmentType     String    @default("FULL_TIME") @map("employment_type")
+  joinedOn           DateTime  @db.Date @map("joined_on")
+  exitOn             DateTime? @db.Date @map("exit_on")
+  mobilePunch        String    @default("NEVER") @map("mobile_punch") // NEVER | REMOTE_DAYS | ALWAYS
+  status             String    @default("ACTIVE") // ACTIVE | EXITED
+  userId             String?   @unique @map("user_id")
+  biometricConsentAt DateTime? @map("biometric_consent_at")
+  biometricConsentBy String?   @map("biometric_consent_by")
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  site         Site        @relation(fields: [siteId], references: [id])
+  department   Department? @relation(fields: [departmentId], references: [id])
+  manager      Employee?   @relation("Reports", fields: [managerId], references: [id])
+  reports      Employee[]  @relation("Reports")
+  days         AttendanceDay[]
+  punches      Punch[]
+  leaveRequests LeaveRequest[]
+  remoteRequests RemoteWorkRequest[]
+  corrections  AttendanceCorrection[]
+  projects     EmployeeProject[]
+
+  @@unique([tenantId, employeeCode])
+  @@index([tenantId, status])
+  @@index([managerId])
+  @@index([departmentId])
+  @@map("employees")
+}
+
+// ── Terminals (copied from hostel, trimmed to M50) ──────────────────────────
+
+model Device {
+  id            String    @id @default(cuid())
+  tenantId      String    @map("tenant_id")
+  siteId        String    @map("site_id")
+  serialNo      String    @unique @map("serial_no")
+  name          String?
+  gateName      String    @map("gate_name")
+  direction     String    // IN | OUT | BOTH
+  clockTimezone String?   @map("clock_timezone") // null ⇒ site timezone
+  terminalToken String?   @map("terminal_token")
+  terminalType  String?   @map("terminal_type")
+  status        String    @default("provisioned") // provisioned | registered | online | offline
+  lastSeenAt    DateTime? @map("last_seen_at")
+  /// Backfill cursor: highest LogID durably ingested (LogID, NOT position).
+  lastLogId     Int?      @map("last_log_id")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  site          Site           @relation(fields: [siteId], references: [id])
+  terminalUsers TerminalUser[]
+  punches       Punch[]
+
+  @@index([tenantId])
+  @@map("devices")
+}
+
+/// Maps a terminal's device-local UserID (1..99999999) to an employee.
+model TerminalUser {
+  id             String    @id @default(cuid())
+  tenantId       String    @map("tenant_id")
+  deviceId       String    @map("device_id")
+  device         Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  terminalUserId Int       @map("terminal_user_id")
+  subjectType    String    @default("EMPLOYEE") @map("subject_type")
+  subjectId      String    @map("subject_id")
+  faceEnrolled   Boolean   @default(false) @map("face_enrolled")
+  enrolledAt     DateTime? @map("enrolled_at")
+  /// Set once the user is deleted from the device on offboarding. The row stays
+  /// so the slot number is never handed to anyone else.
+  releasedAt     DateTime? @map("released_at")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  @@unique([deviceId, terminalUserId])
+  @@unique([deviceId, subjectType, subjectId])
+  @@index([subjectId])
+  @@map("terminal_users")
+}
+
+/// Opaque vendor face templates harvested with GetFaceData.
+model TerminalFaceTemplate {
+  id             String   @id @default(cuid())
+  tenantId       String   @map("tenant_id")
+  subjectType    String   @default("EMPLOYEE") @map("subject_type")
+  subjectId      String   @map("subject_id")
+  vendor         String
+  terminalType   String?  @map("terminal_type")
+  template       String
+  templateSha256 String   @map("template_sha256")
+  sourceDeviceId String?  @map("source_device_id")
+  status         String   @default("active")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  @@unique([subjectType, subjectId, vendor])
+  @@index([tenantId])
+  @@map("terminal_face_templates")
+}
+
+// ── Punches & attendance ────────────────────────────────────────────────────
+
+/// Immutable. Corrections are new rows with source = CORRECTION (D5).
+model Punch {
+  id             String    @default(cuid())
+  punchedAt      DateTime  @db.Timestamptz(3) @map("punched_at")
+  tenantId       String    @map("tenant_id")
+  siteId         String    @map("site_id")
+  employeeId     String?   @map("employee_id") // null = UNKNOWN slot
+  deviceId       String?   @map("device_id")
+  terminalUserId Int?      @map("terminal_user_id")
+  deviceLogId    Int?      @map("device_log_id")
+  source         String    // TERMINAL | MOBILE | CORRECTION | MANUAL
+  direction      String    // in | out | unknown
+  outcome        String    @default("GRANTED") // GRANTED | DENIED | UNKNOWN
+  workDate       DateTime? @db.Date @map("work_date")
+  lat            Float?
+  lng            Float?
+  accuracy       Float?
+  isMockLocation Boolean?  @map("is_mock_location")
+  correctionId   String?   @map("correction_id")
+  reason         String?
+  createdBy      String?   @map("created_by")
+  photoKey       String?   @map("photo_key")
+  receivedAt     DateTime  @default(now()) @map("received_at")
+
+  employee Employee? @relation(fields: [employeeId], references: [id])
+  device   Device?   @relation(fields: [deviceId], references: [id])
+
+  @@id([id, punchedAt])
+  @@unique([deviceId, deviceLogId, punchedAt])
+  @@index([employeeId, punchedAt])
+  @@index([siteId, punchedAt])
+  @@index([tenantId, punchedAt])
+  @@map("punches")
+}
+
+/// One row per employee per work date. Materialised ahead (§7.2), recomputed on every change (D4).
+model AttendanceDay {
+  id                String    @id @default(cuid())
+  tenantId          String    @map("tenant_id")
+  siteId            String    @map("site_id")
+  employeeId        String    @map("employee_id")
+  workDate          DateTime  @db.Date @map("work_date")
+  timezone          String
+  dayType           String    @map("day_type") // WORKING | WEEKLY_OFF | HOLIDAY
+  holidayName       String?   @map("holiday_name")
+  shiftId           String?   @map("shift_id")
+  shiftKind         String?   @map("shift_kind") // FIXED | FLEXIBLE
+  shiftBreakMinutes Int       @default(0) @map("shift_break_minutes")
+  schedStart        DateTime? @db.Timestamptz(3) @map("sched_start")
+  schedEnd          DateTime? @db.Timestamptz(3) @map("sched_end")
+  coreStart         DateTime? @db.Timestamptz(3) @map("core_start")
+  coreEnd           DateTime? @db.Timestamptz(3) @map("core_end")
+  windowStart       DateTime  @db.Timestamptz(3) @map("window_start")
+  windowEnd         DateTime  @db.Timestamptz(3) @map("window_end")
+  requiredMinutes   Int       @default(0) @map("required_minutes")
+  policyId          String?   @map("policy_id")
+  /// The policy values this day is judged with, frozen at materialisation.
+  policy            Json      @default("{}")
+  firstIn           DateTime? @db.Timestamptz(3) @map("first_in")
+  lastOut           DateTime? @db.Timestamptz(3) @map("last_out")
+  segments          Json      @default("[]")
+  workedMinutes     Int       @default(0) @map("worked_minutes")
+  breakMinutes      Int       @default(0) @map("break_minutes")
+  lateMinutes       Int       @default(0) @map("late_minutes")
+  earlyExitMinutes  Int       @default(0) @map("early_exit_minutes")
+  overtimeMinutes   Int       @default(0) @map("overtime_minutes")
+  punchCount        Int       @default(0) @map("punch_count")
+  status            String    @default("PENDING")
+  liveState         String    @default("NOT_YET_IN") @map("live_state")
+  isLate            Boolean   @default(false) @map("is_late")
+  isEarlyExit       Boolean   @default(false) @map("is_early_exit")
+  missedPunch       Boolean   @default(false) @map("missed_punch")
+  workedOnOffDay    Boolean   @default(false) @map("worked_on_off_day")
+  hasLeaveConflict  Boolean   @default(false) @map("has_leave_conflict")
+  leavePortion      Decimal   @default(0) @db.Decimal(2, 1) @map("leave_portion")
+  leaveHalf         String?   @map("leave_half") // FIRST | SECOND
+  leaveTypeId       String?   @map("leave_type_id")
+  remote            Boolean   @default(false)
+  corrected         Boolean   @default(false)
+  finalizedAt       DateTime? @map("finalized_at")
+  computedAt        DateTime  @default(now()) @map("computed_at")
+
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@unique([employeeId, workDate])
+  @@index([tenantId, workDate, status])
+  @@index([siteId, workDate])
+  @@index([windowEnd, finalizedAt])
+  @@map("attendance_days")
+}
+
+model AttendanceCorrection {
+  id           String    @id @default(cuid())
+  tenantId     String    @map("tenant_id")
+  employeeId   String    @map("employee_id")
+  workDate     DateTime  @db.Date @map("work_date")
+  inAt         DateTime? @db.Timestamptz(3) @map("in_at")
+  outAt        DateTime? @db.Timestamptz(3) @map("out_at")
+  reason       String
+  status       String    @default("PENDING") // PENDING | APPROVED | REJECTED | CANCELLED
+  requestedBy  String    @map("requested_by")
+  approverId   String?   @map("approver_id")
+  decidedAt    DateTime? @map("decided_at")
+  decisionNote String?   @map("decision_note")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, status])
+  @@index([employeeId, workDate])
+  @@map("attendance_corrections")
+}
+
+// ── Schedule ────────────────────────────────────────────────────────────────
+
+model Shift {
+  id              String   @id @default(cuid())
+  tenantId        String   @map("tenant_id")
+  name            String
+  code            String
+  color           String   @default("#cd0447")
+  kind            String   @default("FIXED") // FIXED | FLEXIBLE
+  /// Local wall-clock "HH:mm" in the employee's site timezone.
+  startTime       String   @map("start_time")
+  endTime         String   @map("end_time")
+  breakMinutes    Int      @default(0) @map("break_minutes")
+  requiredMinutes Int      @map("required_minutes")
+  coreStart       String?  @map("core_start")
+  coreEnd         String?  @map("core_end")
+  worksHolidays   Boolean  @default(false) @map("works_holidays")
+  policyId        String?  @map("policy_id")
+  isDefault       Boolean  @default(false) @map("is_default")
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@unique([tenantId, code])
+  @@map("shifts")
+}
+
+model ShiftPattern {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  name      String
+  cycleDays Int      @map("cycle_days")
+  /// Array of shift id | null (off), length = cycleDays.
+  days      Json
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("shift_patterns")
+}
+
+model EmployeeSchedule {
+  id            String    @id @default(cuid())
+  tenantId      String    @map("tenant_id")
+  employeeId    String    @map("employee_id")
+  effectiveFrom DateTime  @db.Date @map("effective_from")
+  effectiveTo   DateTime? @db.Date @map("effective_to")
+  shiftId       String?   @map("shift_id")
+  /// 0 = Sunday … 6 = Saturday
+  weeklyOffs    Int[]     @default([]) @map("weekly_offs")
+  patternId     String?   @map("pattern_id")
+  anchorDate    DateTime? @db.Date @map("anchor_date")
+  createdBy     String?   @map("created_by")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  @@index([employeeId, effectiveFrom])
+  @@map("employee_schedules")
+}
+
+model RosterOverride {
+  id         String   @id @default(cuid())
+  tenantId   String   @map("tenant_id")
+  employeeId String   @map("employee_id")
+  date       DateTime @db.Date
+  shiftId    String?  @map("shift_id") // null = off
+  reason     String?
+  createdBy  String   @map("created_by")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@unique([employeeId, date])
+  @@map("roster_overrides")
+}
+
+// ── Leave ───────────────────────────────────────────────────────────────────
+
+model LeaveType {
+  id                 String   @id @default(cuid())
+  tenantId           String   @map("tenant_id")
+  code               String
+  name               String
+  color              String   @default("#2563eb")
+  paid               Boolean  @default(true)
+  active             Boolean  @default(true)
+  allowHalfDay       Boolean  @default(true) @map("allow_half_day")
+  accrualKind        String   @default("NONE") @map("accrual_kind") // NONE | MONTHLY | YEARLY_UPFRONT
+  accrualAmount      Decimal  @default(0) @db.Decimal(5, 1) @map("accrual_amount")
+  maxBalance         Decimal? @db.Decimal(5, 1) @map("max_balance")
+  carryForwardMax    Decimal? @db.Decimal(5, 1) @map("carry_forward_max")
+  allowNegative      Boolean  @default(false) @map("allow_negative")
+  requiresAttachment Boolean  @default(false) @map("requires_attachment")
+  minNoticeDays      Int      @default(0) @map("min_notice_days")
+  countsOffDays      Boolean  @default(false) @map("counts_off_days")
+  requiresHrApproval Boolean  @default(false) @map("requires_hr_approval")
+  createdAt          DateTime @default(now()) @map("created_at")
+
+  requests LeaveRequest[]
+
+  @@unique([tenantId, code])
+  @@map("leave_types")
+}
+
+/// Append-only. Balance = SUM(delta) (view leave_balances).
+model LeaveLedger {
+  id          String   @id @default(cuid())
+  tenantId    String   @map("tenant_id")
+  employeeId  String   @map("employee_id")
+  leaveTypeId String   @map("leave_type_id")
+  leaveYear   Int      @map("leave_year")
+  delta       Decimal  @db.Decimal(5, 1)
+  kind        String   // OPENING | ACCRUAL | DEBIT | REVERSAL | ADJUSTMENT | CARRY_FORWARD | LAPSE | COMP_CREDIT
+  requestId   String?  @map("request_id")
+  /// Idempotency key for jobs, e.g. "ACCRUAL:2026-10", "CF:2027".
+  periodKey   String?  @map("period_key")
+  note        String?
+  createdBy   String?  @map("created_by")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@unique([employeeId, leaveTypeId, periodKey])
+  @@index([employeeId, leaveYear])
+  @@map("leave_ledger")
+}
+
+model LeaveRequest {
+  id                String    @id @default(cuid())
+  tenantId          String    @map("tenant_id")
+  employeeId        String    @map("employee_id")
+  leaveTypeId       String    @map("leave_type_id")
+  startDate         DateTime  @db.Date @map("start_date")
+  endDate           DateTime  @db.Date @map("end_date")
+  startHalf         String?   @map("start_half") // FIRST | SECOND
+  endHalf           String?   @map("end_half")
+  days              Decimal   @db.Decimal(5, 1)
+  reason            String?
+  attachmentKey     String?   @map("attachment_key")
+  status            String    @default("PENDING") // PENDING | APPROVED | REJECTED | CANCELLED
+  managerApproverId String?   @map("manager_approver_id")
+  managerDecidedAt  DateTime? @map("manager_decided_at")
+  approverId        String?   @map("approver_id")
+  decidedAt         DateTime? @map("decided_at")
+  decisionNote      String?   @map("decision_note")
+  createdBy         String?   @map("created_by")
+  createdAt         DateTime  @default(now()) @map("created_at")
+
+  employee  Employee  @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+  leaveType LeaveType @relation(fields: [leaveTypeId], references: [id])
+
+  @@index([tenantId, status])
+  @@index([employeeId, startDate])
+  @@map("leave_requests")
+}
+
+model RemoteWorkRequest {
+  id           String    @id @default(cuid())
+  tenantId     String    @map("tenant_id")
+  employeeId   String    @map("employee_id")
+  startDate    DateTime  @db.Date @map("start_date")
+  endDate      DateTime  @db.Date @map("end_date")
+  reason       String?
+  status       String    @default("PENDING")
+  approverId   String?   @map("approver_id")
+  decidedAt    DateTime? @map("decided_at")
+  decisionNote String?   @map("decision_note")
+  createdBy    String?   @map("created_by")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, status])
+  @@index([employeeId, startDate])
+  @@map("remote_work_requests")
+}
+
+// ── Reports ─────────────────────────────────────────────────────────────────
+
+model ReportJob {
+  id          String    @id @default(cuid())
+  tenantId    String    @map("tenant_id")
+  requestedBy String?   @map("requested_by")
+  scheduleId  String?   @map("schedule_id")
+  type        String
+  format      String    // csv | pdf
+  filters     Json
+  /// The scope the report was generated under (§13).
+  scope       Json
+  status      String    @default("QUEUED") // QUEUED | RUNNING | READY | FAILED
+  storageKey  String?   @map("storage_key")
+  sha256      String?
+  rowCount    Int?      @map("row_count")
+  error       String?
+  generatedAt DateTime? @map("generated_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@map("report_jobs")
+}
+
+model ReportSchedule {
+  id               String    @id @default(cuid())
+  tenantId         String    @map("tenant_id")
+  name             String
+  type             String
+  format           String
+  filters          Json
+  cron             String
+  timezone         String
+  recipientUserIds String[]  @map("recipient_user_ids")
+  enabled          Boolean   @default(true)
+  lastRunAt        DateTime? @map("last_run_at")
+  createdBy        String    @map("created_by")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  @@map("report_schedules")
+}
+
+// ── Notifications & audit ───────────────────────────────────────────────────
+
+model PushDevice {
+  id         String   @id @default(cuid())
+  tenantId   String   @map("tenant_id")
+  userId     String   @map("user_id")
+  platform   String
+  token      String   @unique
+  active     Boolean  @default(true)
+  lastSeenAt DateTime @default(now()) @map("last_seen_at")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([userId])
+  @@map("push_devices")
+}
+
+model AppNotification {
+  id        String    @id @default(cuid())
+  tenantId  String    @map("tenant_id")
+  userId    String    @map("user_id")
+  type      String
+  title     String
+  body      String
+  data      Json?
+  readAt    DateTime? @map("read_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("app_notifications")
+}
+
+/// Append-only: a trigger rejects UPDATE/DELETE (post-init/002).
+model AuditLog {
+  id          String   @id @default(cuid())
+  tenantId    String?  @map("tenant_id")
+  siteId      String?  @map("site_id")
+  actorUserId String?  @map("actor_user_id")
+  actorType   String   @map("actor_type")
+  action      String
+  targetType  String?  @map("target_type")
+  targetId    String?  @map("target_id")
+  ip          String?
+  userAgent   String?  @map("user_agent")
+  payload     Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@index([targetType, targetId])
+  @@map("audit_logs")
+}

@@ -6,6 +6,7 @@ import { Prisma, ReportJob } from '@prisma/client';
 import { Job, Queue } from 'bullmq';
 import { Type } from 'class-transformer';
 import {
+  Allow,
   ArrayMaxSize,
   IsArray,
   IsBoolean,
@@ -33,12 +34,16 @@ import { IsTimeZone, IsYmd } from '../common/validators';
 import { LiveGateway } from '../live/live.gateway';
 import { NotificationsService } from '../notifications/notifications';
 import { toCsv } from './csv';
-import { REPORTS, ReportFilters, reportByType } from './definitions';
+import { AGGS, catalogue, customDefinition, CustomSpec, OPS, SOURCES, validateSpec } from './custom';
+import { REPORTS, ReportDefinition, ReportFilters, reportByType } from './definitions';
 import { PdfRenderer } from './pdf';
 
 export const REPORTS_QUEUE = 'reports';
 
 // ── DTOs ────────────────────────────────────────────────────────────────────
+
+/** A built-in type, or "custom:<template id>". */
+const REPORT_TYPE = new RegExp(`^(${REPORTS.map((r) => r.type).join('|')}|custom:[a-z0-9]{8,40})$`);
 
 export class FiltersDto implements ReportFilters {
   @IsOptional() @IsYmd() dateFrom?: string;
@@ -53,7 +58,7 @@ export class FiltersDto implements ReportFilters {
 }
 
 export class ExportDto {
-  @IsIn(REPORTS.map((r) => r.type)) type: string;
+  @Matches(REPORT_TYPE, { message: 'unknown report type' }) type: string;
   @IsIn(['csv', 'pdf']) format: 'csv' | 'pdf';
   @ValidateNested() @Type(() => FiltersDto) filters: FiltersDto;
 }
@@ -66,7 +71,7 @@ export class ExportListQuery {
 
 export class ScheduleDto {
   @IsString() @MinLength(1) @MaxLength(120) name: string;
-  @IsIn(REPORTS.map((r) => r.type)) type: string;
+  @Matches(REPORT_TYPE, { message: 'unknown report type' }) type: string;
   @IsIn(['csv', 'pdf']) format: 'csv' | 'pdf';
   @ValidateNested() @Type(() => FiltersDto) filters: FiltersDto;
   /** Standard 5-field cron, e.g. "0 7 * * 1" = Mondays 07:00. */
@@ -74,6 +79,46 @@ export class ScheduleDto {
   @IsTimeZone() timezone: string;
   @IsArray() @ArrayMaxSize(100) @IsString({ each: true }) recipientUserIds: string[];
   @IsOptional() @IsBoolean() enabled?: boolean;
+}
+
+class ConditionDto {
+  @IsString() @MaxLength(60) field: string;
+  @IsIn(OPS) op: (typeof OPS)[number];
+  /** string | number | boolean | string[]; checked against the field in validateSpec. */
+  @IsOptional() @Allow() value?: unknown;
+}
+
+class SpecColumnDto {
+  @IsOptional() @IsString() @MaxLength(60) field?: string;
+  @IsOptional() @IsIn(AGGS) agg?: (typeof AGGS)[number];
+  @IsOptional() @IsArray() @ArrayMaxSize(10) @ValidateNested({ each: true }) @Type(() => ConditionDto) where?: ConditionDto[];
+  @IsOptional() @IsString() @MaxLength(60) label?: string;
+}
+
+class SortDto {
+  @Type(() => Number) @IsInt() @Min(0) column: number;
+  @IsIn(['asc', 'desc']) dir: 'asc' | 'desc';
+}
+
+export class SpecDto implements CustomSpec {
+  @IsIn(Object.keys(SOURCES)) source: string;
+  @IsArray() @ArrayMaxSize(40) @ValidateNested({ each: true }) @Type(() => SpecColumnDto) columns: SpecColumnDto[];
+  @IsOptional() @IsArray() @ArrayMaxSize(20) @ValidateNested({ each: true }) @Type(() => ConditionDto) where?: ConditionDto[];
+  @IsOptional() @IsString() sectionBy?: string | null;
+  @IsOptional() @ValidateNested() @Type(() => SortDto) sort?: SortDto | null;
+  @IsOptional() @IsBoolean() chart?: boolean;
+  @IsOptional() @IsBoolean() landscape?: boolean;
+}
+
+export class TemplateDto {
+  @IsString() @MinLength(2) @MaxLength(80) name: string;
+  @IsOptional() @IsString() @MaxLength(300) description?: string;
+  @ValidateNested() @Type(() => SpecDto) spec: SpecDto;
+}
+
+export class PreviewDto {
+  @ValidateNested() @Type(() => SpecDto) spec: SpecDto;
+  @ValidateNested() @Type(() => FiltersDto) filters: FiltersDto;
 }
 
 interface JobScope {
@@ -101,8 +146,29 @@ export class ReportsService {
     @InjectQueue(REPORTS_QUEUE) private readonly queue: Queue,
   ) {}
 
-  catalogue(user: AuthUser) {
-    return REPORTS.filter((r) => this.allowed(user.role, r.type)).map(({ run, ...r }) => r);
+  async catalogue(user: AuthUser) {
+    const custom = user.role === 'EMPLOYEE' ? [] : await this.prisma.reportTemplate.findMany({ where: { tenantId: user.tenantId }, orderBy: { name: 'asc' } });
+    return [...REPORTS, ...custom.map(customDefinition)].filter((r) => this.allowed(user.role, r.type)).map(({ run, ...r }) => r);
+  }
+
+  /** Built-in or a tenant template; 400 for anything else. */
+  async definition(tenantId: string, type: string): Promise<ReportDefinition> {
+    const id = type.startsWith('custom:') ? type.slice(7) : null;
+    const def = id ? await this.prisma.reportTemplate.findFirst({ where: { id, tenantId } }).then((t) => t && customDefinition(t)) : reportByType(type);
+    if (!def) throw new AppError(400, 'UNKNOWN_REPORT', 'That report no longer exists');
+    return def;
+  }
+
+  /** Runs a template draft under the user's scope; the builder shows the first rows. */
+  async preview(user: AuthUser, dto: PreviewDto) {
+    validateSpec(dto.spec);
+    const def = customDefinition({ id: 'preview', name: 'Preview', description: null, spec: dto.spec });
+    const { from, to } = this.resolvePeriod(dto.filters, await this.tenantTz(user.tenantId));
+    if (from > to) throw new AppError(400, 'BAD_RANGE', 'dateFrom is after dateTo');
+    if (diffDays(from, to) + 1 > def.maxDays) throw new AppError(400, 'RANGE_TOO_LARGE', `This data source covers at most ${def.maxDays} days`);
+    const data = await def.run({ prisma: this.prisma, tenantId: user.tenantId, from, to, filters: dto.filters, employeeWhere: await this.scope.employeeWhere(user) });
+    const total = data.sections.reduce((s, x) => s + x.rows.length, 0);
+    return { ...data, from, to, total, sections: data.sections.map((s) => ({ ...s, rows: s.rows.slice(0, 50) })) };
   }
 
   /** EMPLOYEE: own timesheet only; everyone else is limited by scope (§13). */
@@ -134,7 +200,7 @@ export class ReportsService {
   }
 
   async requestExport(user: AuthUser, dto: ExportDto, scheduleId?: string) {
-    const def = reportByType(dto.type)!;
+    const def = await this.definition(user.tenantId, dto.type);
     if (!this.allowed(user.role, dto.type)) throw new AppError(403, 'FORBIDDEN', 'Employees can export only their own timesheet');
     if (!def.formats.includes(dto.format)) throw new AppError(400, 'FORMAT_UNSUPPORTED', `${def.title} is not available as ${dto.format}`);
     const tz = await this.tenantTz(user.tenantId);
@@ -169,7 +235,7 @@ export class ReportsService {
     if (!job || job.status === 'READY') return;
     await this.prisma.reportJob.update({ where: { id: jobId }, data: { status: 'RUNNING' } });
     try {
-      const def = reportByType(job.type)!;
+      const def = await this.definition(job.tenantId, job.type);
       const scope = job.scope as unknown as JobScope;
       const filters = job.filters as ReportFilters;
       const tenant = await this.prisma.tenant.findUniqueOrThrow({ where: { id: job.tenantId } });
@@ -289,7 +355,7 @@ export class ReportsService {
   async downloadUrl(user: AuthUser, jobId: string) {
     const job = await this.get(user, jobId);
     if (job.status !== 'READY' || !job.storageKey) throw new AppError(409, 'NOT_READY', `Export is ${job.status.toLowerCase()}`);
-    const def = reportByType(job.type);
+    const def = await this.definition(job.tenantId, job.type).catch(() => null);
     const name = `${def?.title.replace(/[^\w]+/g, '-') ?? job.type}-${job.id}.${job.format}`;
     return this.supabase.signedUrl(BUCKETS.reports(), job.storageKey, 300, name);
   }
@@ -395,6 +461,70 @@ export class ReportsController {
     return res.status(302).redirect(url);
   }
 
+  // ── Custom report templates ──────────────────────────────────────────────
+
+  /** Data sources and their fields, for the builder. */
+  @Get('fields')
+  @Roles('ADMIN', 'HR')
+  fields() {
+    return catalogue();
+  }
+
+  @Get('templates')
+  @Roles('ADMIN', 'HR')
+  templates(@CurrentUser() user: AuthUser) {
+    return this.prisma.reportTemplate.findMany({ where: { tenantId: user.tenantId }, orderBy: { name: 'asc' } });
+  }
+
+  @Post('templates/preview')
+  @Roles('ADMIN', 'HR')
+  preview(@CurrentUser() user: AuthUser, @Body() dto: PreviewDto) {
+    return this.reports.preview(user, dto);
+  }
+
+  @Post('templates')
+  @Roles('ADMIN', 'HR')
+  async createTemplate(@CurrentUser() user: AuthUser, @Body() dto: TemplateDto) {
+    validateSpec(dto.spec);
+    await this.uniqueName(user, dto.name);
+    return this.audit.run({
+      action: 'REPORT_TEMPLATE_CREATED', targetType: 'ReportTemplate', actor: actorOf(user), tenantId: user.tenantId, payloadFrom: () => ({ ...dto }),
+      run: (tx) => tx.reportTemplate.create({ data: { tenantId: user.tenantId, name: dto.name, description: dto.description, spec: dto.spec as unknown as Prisma.InputJsonValue, createdBy: user.sub } }),
+    });
+  }
+
+  @Patch('templates/:id')
+  @Roles('ADMIN', 'HR')
+  async updateTemplate(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() dto: TemplateDto) {
+    await this.prisma.reportTemplate.findFirstOrThrow({ where: { id, tenantId: user.tenantId } });
+    validateSpec(dto.spec);
+    await this.uniqueName(user, dto.name, id);
+    return this.audit.run({
+      action: 'REPORT_TEMPLATE_UPDATED', targetType: 'ReportTemplate', targetId: id, actor: actorOf(user), tenantId: user.tenantId, payloadFrom: () => ({ ...dto }),
+      run: (tx) => tx.reportTemplate.update({ where: { id }, data: { name: dto.name, description: dto.description ?? null, spec: dto.spec as unknown as Prisma.InputJsonValue } }),
+    });
+  }
+
+  @Delete('templates/:id')
+  @Roles('ADMIN', 'HR')
+  async deleteTemplate(@CurrentUser() user: AuthUser, @Param('id') id: string) {
+    await this.prisma.reportTemplate.findFirstOrThrow({ where: { id, tenantId: user.tenantId } });
+    if (await this.prisma.reportSchedule.count({ where: { tenantId: user.tenantId, type: `custom:${id}` } })) {
+      throw new AppError(409, 'TEMPLATE_SCHEDULED', 'A schedule uses this report; remove the schedule first');
+    }
+    await this.audit.run({
+      action: 'REPORT_TEMPLATE_DELETED', targetType: 'ReportTemplate', targetId: id, actor: actorOf(user), tenantId: user.tenantId,
+      run: (tx) => tx.reportTemplate.delete({ where: { id } }),
+    });
+    return { deleted: true };
+  }
+
+  private async uniqueName(user: AuthUser, name: string, exceptId?: string) {
+    if (await this.prisma.reportTemplate.count({ where: { tenantId: user.tenantId, name, ...(exceptId ? { id: { not: exceptId } } : {}) } })) {
+      throw new AppError(409, 'TEMPLATE_NAME_TAKEN', 'A report with this name already exists');
+    }
+  }
+
   @Get('schedules')
   @Roles('ADMIN', 'HR', 'MANAGER')
   schedules(@CurrentUser() user: AuthUser) {
@@ -407,6 +537,7 @@ export class ReportsController {
   @Post('schedules')
   @Roles('ADMIN', 'HR', 'MANAGER')
   async createSchedule(@CurrentUser() user: AuthUser, @Body() dto: ScheduleDto) {
+    await this.reports.definition(user.tenantId, dto.type);
     await this.checkRecipients(user, dto.recipientUserIds);
     if (!dto.filters.period) throw new AppError(400, 'PERIOD_REQUIRED', 'Scheduled reports need a relative period (e.g. yesterday, lastMonth)');
     const s = await this.audit.run({
@@ -428,6 +559,7 @@ export class ReportsController {
   @Roles('ADMIN', 'HR', 'MANAGER')
   async updateSchedule(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() dto: ScheduleDto) {
     await this.ownSchedule(user, id);
+    await this.reports.definition(user.tenantId, dto.type);
     await this.checkRecipients(user, dto.recipientUserIds);
     const s = await this.audit.run({
       action: 'REPORT_SCHEDULE_UPDATED',

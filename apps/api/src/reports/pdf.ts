@@ -22,7 +22,9 @@ const BADGE_TONE: Record<string, Tone> = {
   P: 'success', R: 'success', PRESENT: 'success', REMOTE: 'success', TERMINAL: 'neutral', MOBILE: 'info',
   A: 'danger', ABSENT: 'danger', 'A/½L': 'danger', MANUAL: 'warning', CORRECTION: 'warning',
   HD: 'warning', HALF_DAY: 'warning', L: 'info', '½L': 'info', ON_LEAVE: 'info', H: 'neutral', WO: 'neutral',
+  Present: 'success', Remote: 'success', Absent: 'danger', 'Half day': 'warning', 'On leave': 'info', 'Half leave': 'info', Holiday: 'neutral', 'Weekly off': 'neutral',
 };
+const LEGEND: Array<[string, string]> = [['P', 'Present'], ['A', 'Absent'], ['HD', 'Half day'], ['L', 'Leave'], ['½L', 'Half leave'], ['R', 'Remote'], ['H', 'Holiday'], ['WO', 'Weekly off']];
 
 /** Points, portrait. */
 const PAPER = { A4: [595.28, 841.89], A3: [841.89, 1190.55] } as const;
@@ -71,7 +73,7 @@ export interface RenderMeta {
   dataSha256: string;
 }
 
-const str = (v: unknown) => (v === null || v === undefined ? '' : String(v));
+const str = (v: unknown) => (v === null || v === undefined ? '' : typeof v === 'number' && Math.abs(v) >= 10000 ? v.toLocaleString('en-IN') : String(v));
 const hline = (w: number, color: string, width = 0.5): Content => ({ canvas: [{ type: 'line', x1: 0, y1: 0, x2: w, y2: 0, lineWidth: width, lineColor: color }] });
 
 function band(def: ReportDefinition, meta: RenderMeta, width: number, hasLogo: boolean): Content {
@@ -108,8 +110,9 @@ function band(def: ReportDefinition, meta: RenderMeta, width: number, hasLogo: b
 
 function kpis(items: ReportData['kpis'], width: number, a3: boolean): Content[] {
   if (!items.length) return [];
-  const rows = Math.ceil(items.length / Math.max(1, Math.floor(width / 92)));
-  const perRow = Math.ceil(items.length / rows);
+  const fit = Math.max(1, Math.floor(width / 92));
+  const rows = Math.ceil(items.length / fit);
+  const perRow = Math.max(Math.ceil(items.length / rows), Math.min(fit, 5));
   const card = (k: ReportData['kpis'][number]): PdfColumn => {
     const tone = k.tone ? TONE[k.tone] : null;
     return {
@@ -181,7 +184,8 @@ function table(s: Section, a3: boolean): Content {
   const layout: CustomTableLayout = {
     hLineWidth: (i) => (i === 0 ? 0 : i === 1 || (foot.length && i === rows - 1) ? 0.8 : 0.5),
     hLineColor: (i) => (i === 1 || (foot.length && i === rows - 1) ? C.lineStrong : C.lineSoft),
-    vLineWidth: () => 0,
+    vLineWidth: (i) => (s.columns[i]?.divider ? 0.8 : 0),
+    vLineColor: () => C.lineStrong,
     fillColor: (i) => (i > 1 && i <= body.length && i % 2 === 0 ? C.subtle : null),
     paddingLeft: () => pad,
     paddingRight: () => pad,
@@ -192,6 +196,23 @@ function table(s: Section, a3: boolean): Content {
     table: { headerRows: 1, dontBreakRows: true, widths, body: [header, ...body, ...foot] },
     layout,
     margin: [0, 0, 0, 10],
+  };
+}
+
+/** One line under a table: what the status colours and codes mean. */
+function legend(s: Section): Content | null {
+  const codes = new Set(s.rows.flatMap((r) => s.columns.filter((c) => c.badge).map((c) => str(r[c.key]))));
+  const used = LEGEND.filter(([code]) => [...codes].some((v) => v.replace('*', '').split('/').includes(code)));
+  if (!used.length) return null;
+  const late = [...codes].some((v) => v.endsWith('*'));
+  return {
+    text: [
+      ...used.flatMap(([code, label]) => [{ text: ` ${code} `, color: TONE[BADGE_TONE[code] ?? 'neutral'].fg, background: TONE[BADGE_TONE[code] ?? 'neutral'].soft, bold: true }, { text: ` ${label}    ` }]),
+      ...(late ? [{ text: '*', bold: true }, { text: ' late arrival' }] : []),
+    ],
+    fontSize: 6.5,
+    color: C.muted,
+    margin: [0, -4, 0, 10],
   };
 }
 
@@ -223,8 +244,17 @@ export function buildDoc(def: ReportDefinition, data: ReportData, meta: RenderMe
     ...(sections.length
       ? sections.map((s, i): Content => ({
           stack: [
-            ...(s.title ? [{ text: s.title, fontSize: 10.5, bold: true, margin: [0, 6, 0, 5] } as Content] : []),
+            ...(s.title
+              ? [{
+                  columns: [
+                    { text: s.title, fontSize: 10.5, bold: true },
+                    { text: `${s.rows.length} ${s.rows.length === 1 ? 'row' : 'rows'}`, alignment: 'right', fontSize: 7.5, color: C.muted, margin: [0, 3, 0, 0] },
+                  ],
+                  margin: [0, 6, 0, 5],
+                } as Content]
+              : []),
             table(s, a3),
+            ...[legend(s)].filter((x): x is Content => x !== null),
             ...(data.signOff ? [signOff(width)] : []),
           ],
           pageBreak: breakGroups && i > 0 ? 'before' : undefined,

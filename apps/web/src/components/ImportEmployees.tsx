@@ -1,4 +1,4 @@
-import { Badge, Button, Callout, Checkbox, DataTable, FileDropzone, Modal } from '@iverto-org/core-ui';
+import { Badge, Button, Callout, Switch, DataTable, FileDropzone, Modal } from '@iverto-org/core-ui';
 import { ArrowLeft, Check, CheckCircle2, Download, FileSpreadsheet, MapPin, RefreshCw, Trash2, Upload, Wand2 } from 'lucide-react';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { post, useAction, useDepartments, useEmployeeOptions, useSites } from '../lib/api';
@@ -174,7 +174,7 @@ export function ImportEmployees({ onClose }: { onClose: () => void }) {
           <>
             <SitePicker label="Which office location are these employees at?" required value={siteId} onChange={setSiteId} />
             {site && <p className="text-sm text-fg-muted">Everyone in the file joins <b className="text-fg">{site.name}</b> ({site.timezone}) and follows its holiday calendar. Import one file per location.</p>}
-            <Checkbox appearance="boxed" label="Biometric consent was collected for everyone in this file" description="Recorded against each employee; required before enrolling faces (DPDP Act / GDPR)." checked={consent} onChange={(e) => setConsent(e.target.checked)} />
+            <Switch label="Biometric consent was collected for everyone in this file" description="Recorded against each employee; required before enrolling faces (DPDP Act / GDPR)." checked={consent} onChange={setConsent} />
             <div className="rounded-2xl border border-line-soft bg-surface-subtle p-4">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2 font-semibold text-fg"><FileSpreadsheet size={18} className="text-brand" /> The template</div>
@@ -328,7 +328,7 @@ function Review({ rows, checked, fresh, pending, problems, departments, onlyProb
 
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="font-semibold text-fg">{onlyProblems ? 'Rows that need fixing' : 'All rows'}</h3>
-        <Checkbox label="Only rows with problems" checked={onlyProblems} onChange={(e) => setOnlyProblems(e.target.checked)} />
+        <Switch label="Only rows with problems" checked={onlyProblems} onChange={setOnlyProblems} />
       </div>
       <div className="max-h-[26rem] overflow-auto rounded-2xl border border-line">
         <DataTable rows={shown} getRowKey={(r) => String(r._id)}

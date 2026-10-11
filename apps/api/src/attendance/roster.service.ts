@@ -59,6 +59,8 @@ export function policySnapshot(p: AttendancePolicy | null): EnginePolicy & Recor
     overtimeMinMinutes: p?.overtimeMinMinutes ?? 30,
     breakDeduction: (p?.breakDeduction ?? 'SHIFT_BREAK') as EnginePolicy['breakDeduction'],
     roundingMinutes: p?.roundingMinutes ?? 0,
+    lateDeduction: p?.lateDeduction ?? 'NONE',
+    lateDeductionEvery: p?.lateDeductionEvery ?? 2,
   };
 }
 

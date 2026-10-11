@@ -1,5 +1,5 @@
 import {
-  Badge, Button, Checkbox, DataTable, DateInput, EmptyState, ListFooter, PageHeader, Pagination, PillTabs, SegmentedControl, Select, Textarea, TextField, Tooltip,
+  Badge, Button, Switch, DataTable, DateInput, EmptyState, ListFooter, PageHeader, Pagination, PillTabs, SegmentedControl, Select, Textarea, TextField, Tooltip,
 } from '@iverto-org/core-ui';
 import { Plus } from 'lucide-react';
 import { useState } from 'react';
@@ -37,8 +37,8 @@ export function Daily() {
             {isManager(me) && <SiteSelect value={siteId} onChange={reset(setSite)} />}
             {isManager(me) && <DepartmentSelect value={departmentId} onChange={reset(setDept)} />}
             <Select hideLabel label="Status" placeholder="Any status" containerClassName="w-full sm:w-44" options={toOptions(DAY_STATUS)} value={status} onChange={(e) => reset(setStatus)(e.target.value)} />
-            <Checkbox label="Late" checked={isLate} onChange={(e) => reset(setLate)(e.target.checked)} />
-            <Checkbox label="Missed punch" checked={missedPunch} onChange={(e) => reset(setMissed)(e.target.checked)} />
+            <Switch label="Late" checked={isLate} onChange={reset(setLate)} />
+            <Switch label="Missed punch" checked={missedPunch} onChange={reset(setMissed)} />
           </div>
         } />
       <Panel>
@@ -87,7 +87,7 @@ export function Logs() {
             {isManager(me) && <SiteSelect value={siteId} onChange={setSite} />}
             <Select hideLabel label="Source" placeholder="All sources" containerClassName="w-full sm:w-44" value={source} onChange={(e) => setSource(e.target.value)}
               options={['TERMINAL', 'MOBILE', 'CORRECTION', 'MANUAL'].map((s) => ({ value: s, label: s[0] + s.slice(1).toLowerCase() }))} />
-            {isHr(me) && <Checkbox label="Unknown slots only" checked={unknownOnly} onChange={(e) => setUnknown(e.target.checked)} />}
+            {isHr(me) && <Switch label="Unknown slots only" checked={unknownOnly} onChange={setUnknown} />}
           </div>
         } />
       <Panel>

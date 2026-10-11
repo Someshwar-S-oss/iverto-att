@@ -135,6 +135,9 @@ model AttendancePolicy {
   roundingMinutes     Int      @default(0) @map("rounding_minutes")
   minRestHours        Int      @default(8) @map("min_rest_hours")
   maxWeeklyHours      Int      @default(60) @map("max_weekly_hours")
+  /// Every `lateDeductionEvery` late days in a month deducts this much attendance.
+  lateDeduction       String   @default("NONE") @map("late_deduction") // NONE | HALF_DAY | FULL_DAY
+  lateDeductionEvery  Int      @default(2) @map("late_deduction_every")
   createdAt           DateTime @default(now()) @map("created_at")
   updatedAt           DateTime @updatedAt @map("updated_at")
 
@@ -576,6 +579,21 @@ model ReportJob {
 
   @@index([tenantId, createdAt(sort: Desc)])
   @@map("report_jobs")
+}
+
+/// A tenant-built report (reports/custom.ts): a JSON spec over the field catalogue. Runs as type "custom:<id>".
+model ReportTemplate {
+  id          String   @id @default(cuid())
+  tenantId    String   @map("tenant_id")
+  name        String
+  description String?
+  spec        Json
+  createdBy   String   @map("created_by")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@unique([tenantId, name])
+  @@map("report_templates")
 }
 
 model ReportSchedule {

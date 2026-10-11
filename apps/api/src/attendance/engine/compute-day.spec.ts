@@ -1,4 +1,4 @@
-import { computeAttendanceDay, EngineDay, EngineInput, EnginePolicy, EnginePunch } from './compute-day';
+import { computeAttendanceDay, lateDeductionDays, EngineDay, EngineInput, EnginePolicy, EnginePunch } from './compute-day';
 import { punchWindow, resolveDay, RosterData, ShiftDef, shiftInstants, slotOf } from './schedule';
 
 const TZ = 'Asia/Kolkata';
@@ -285,5 +285,18 @@ describe('schedule resolution and punch windows (§6.3, §7)', () => {
     expect(i.requiredMinutes).toBe(7 * 60 - 60);
     const autumn = shiftInstants('2026-10-24', NIGHT, 'Europe/London');
     expect((autumn.schedEnd.getTime() - autumn.schedStart.getTime()) / 3_600_000).toBe(9);
+  });
+});
+
+describe('lateDeductionDays', () => {
+  it('deducts per completed block of late days', () => {
+    const half = { lateDeduction: 'HALF_DAY', lateDeductionEvery: 2 };
+    expect([0, 1, 2, 3, 4, 5].map((n) => lateDeductionDays(n, half))).toEqual([0, 0, 0.5, 0.5, 1, 1]);
+    expect(lateDeductionDays(7, { lateDeduction: 'FULL_DAY', lateDeductionEvery: 3 })).toBe(2);
+  });
+  it('is off for NONE, missing or old snapshots', () => {
+    expect(lateDeductionDays(10, { lateDeduction: 'NONE', lateDeductionEvery: 2 })).toBe(0);
+    expect(lateDeductionDays(10, {})).toBe(0);
+    expect(lateDeductionDays(10, null)).toBe(0);
   });
 });

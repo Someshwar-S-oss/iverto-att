@@ -21,7 +21,7 @@ export function Settings() {
       { id: 'sites', label: 'Sites', icon: <MapPin size={18} />, description: 'Locations and timezones' },
       { id: 'departments', label: 'Departments', icon: <Layers size={18} /> },
       { id: 'projects', label: 'Projects', icon: <FolderKanban size={18} /> },
-      { id: 'policies', label: 'Attendance policies', icon: <Scale size={18} />, description: 'Grace, thresholds, overtime' },
+      { id: 'policies', label: 'Attendance policies', icon: <Scale size={18} />, description: 'Grace, thresholds, overtime, late penalty' },
       { id: 'users', label: 'Users & roles', icon: <Users size={18} /> },
     ] : []),
     { id: 'password', label: 'Password', icon: <KeyRound size={18} /> },
@@ -60,7 +60,7 @@ function Organisation() {
 function OrgForm({ org }: { org: Org }) {
   const s = org.settings ?? {};
   const [f, , setF] = useForm<Record<string, any>>({
-    name: org.name, dayBoundary: s.dayBoundary ?? '04:00', defaultWeeklyOffs: s.defaultWeeklyOffs ?? [0], storePunchPhotos: Boolean(s.storePunchPhotos),
+    name: org.name, dayBoundary: s.dayBoundary ?? '04:00', defaultWeeklyOffs: s.defaultWeeklyOffs ?? [0], storePunchPhotos: Boolean(s.storePunchPhotos), leaveCountsAgainstAttendance: Boolean(s.leaveCountsAgainstAttendance),
     punchPhotoRetentionDays: s.punchPhotoRetentionDays ?? 90, reportRetentionDays: s.reportRetentionDays ?? 90,
     displayName: s.branding?.displayName ?? '', logoUrl: s.branding?.logoUrl ?? '', primaryColor: s.branding?.primaryColor ?? null,
   });
@@ -79,6 +79,7 @@ function OrgForm({ org }: { org: Org }) {
           { key: 'storePunchPhotos', label: 'Keep punch photos', type: 'bool', hint: 'Off by default — biometric data minimisation' },
           { key: 'punchPhotoRetentionDays', label: 'Punch photo retention (days)', type: 'number', when: (x) => x.storePunchPhotos },
           { key: 'reportRetentionDays', label: 'Report file retention (days)', type: 'number' },
+          { key: 'leaveCountsAgainstAttendance', label: 'Approved leave lowers attendance score', type: 'bool', hint: 'Leaderboard. Off: approved leave days are left out; unapproved absences always count.' },
           { key: 'displayName', label: 'Name on reports', hint: 'Shown in the PDF header' },
           { key: 'logoUrl', label: 'Logo URL (https)', hint: 'Without one, reports use the Iverto lockup' },
           { key: 'primaryColor', label: 'Report accent colour', type: 'color' },
@@ -122,18 +123,21 @@ function Departments() {
   );
 }
 
+const LATE_DEDUCTION: Record<string, string> = { HALF_DAY: '½ day', FULL_DAY: '1 day' };
+
 function Policies() {
   const n = (key: string, label: string, hint?: string) => ({ key, label, hint, type: 'number' as const });
   return (
     <Crud embedded title="Attendance policies" subtitle="Changes apply from today; past days keep the policy they were judged with." path="/attendance-policies" noun="policy"
       blank={{ name: '', isDefault: false, graceInMinutes: 10, graceOutMinutes: 10, halfDayMinPercent: 50, fullDayMinPercent: 90, earlyWindowMinutes: 180, lateWindowMinutes: 360,
         duplicatePunchSeconds: 60, minSessionMinutes: 5, absentAfterMinutes: 120, missedOutCredit: 'NONE', overtimeEnabled: false, overtimeMinMinutes: 30, breakDeduction: 'SHIFT_BREAK',
-        roundingMinutes: 0, minRestHours: 8, maxWeeklyHours: 60 }}
+        roundingMinutes: 0, minRestHours: 8, maxWeeklyHours: 60, lateDeduction: 'NONE', lateDeductionEvery: 2 }}
       columns={[
         { key: 'name', header: 'Policy', render: (p: any) => <span className="font-semibold text-fg">{p.name} {p.isDefault && <Badge tone="brand">Default</Badge>}</span> },
         { key: 'grace', header: 'Grace in/out', render: (p: any) => `${p.graceInMinutes} / ${p.graceOutMinutes} min` },
         { key: 'thr', header: 'Half / full day', render: (p: any) => `${p.halfDayMinPercent}% / ${p.fullDayMinPercent}%` },
         { key: 'ot', header: 'Overtime', render: (p: any) => (p.overtimeEnabled ? `after ${p.overtimeMinMinutes} min` : 'Off') },
+        { key: 'ld', header: 'Late penalty', render: (p: any) => (p.lateDeduction === 'NONE' ? 'Off' : `${LATE_DEDUCTION[p.lateDeduction]} per ${p.lateDeductionEvery} late days`) },
       ]}
       fields={[
         { key: 'name', label: 'Name', required: true },
@@ -151,6 +155,9 @@ function Policies() {
         { key: 'breakDeduction', label: 'Break deduction', type: 'select', options: [{ value: 'SHIFT_BREAK', label: 'Deduct the shift’s break' }, { value: 'NONE', label: 'None' }] },
         { key: 'overtimeEnabled', label: 'Count overtime', type: 'bool' },
         { ...n('overtimeMinMinutes', 'Overtime counts from (min)'), when: (f) => f.overtimeEnabled },
+        { key: 'lateDeduction', label: 'Late penalty', type: 'select', hint: 'Deducted from monthly attendance (muster roll, leaderboard)',
+          options: [{ value: 'NONE', label: 'Off' }, { value: 'HALF_DAY', label: 'Deduct half a day' }, { value: 'FULL_DAY', label: 'Deduct a full day' }] },
+        { ...n('lateDeductionEvery', 'For every … late days in a month', 'e.g. half a day for every 2 → 4 late days cost a full day'), when: (f) => f.lateDeduction !== 'NONE' },
         n('roundingMinutes', 'Round worked time down to (min)'),
         n('minRestHours', 'Minimum rest between shifts (h)', 'Roster warning only'),
         n('maxWeeklyHours', 'Maximum weekly hours', 'Roster warning only'),

@@ -4,7 +4,8 @@
  * PDF, so the three can never disagree.
  */
 import { Prisma, PrismaClient } from '@prisma/client';
-import { STATUS_CODE, statusCode } from '../attendance/present';
+import { lateDeductionDays } from '../attendance/engine/compute-day';
+import { statusCode } from '../attendance/present';
 import { dbDate, eachDay, formatLocal, leaveYearOf, ymdOf } from '../common/time';
 
 export interface ReportFilters {
@@ -26,6 +27,8 @@ export interface Column {
   align?: 'right' | 'center';
   /** Render as a status badge in the PDF. */
   badge?: boolean;
+  /** Rule on the left (separates a totals block). */
+  divider?: boolean;
 }
 
 export interface Section {
@@ -61,10 +64,12 @@ export interface ReportDefinition {
   /** Filters the UI should offer. */
   filters: Array<keyof ReportFilters>;
   maxDays: number;
+  /** A tenant-built template (custom.ts). */
+  custom?: boolean;
   run(ctx: ReportContext): Promise<ReportData>;
 }
 
-const hm = (minutes: number) => (minutes ? `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, '0')}` : '');
+export const hm = (minutes: number) => (minutes ? `${Math.floor(minutes / 60)}:${String(minutes % 60).padStart(2, '0')}` : '');
 const pct = (n: number, d: number) => (d ? `${Math.round((n * 1000) / d) / 10}%` : '–');
 const COMMON: Array<keyof ReportFilters> = ['dateFrom', 'dateTo', 'period', 'siteIds', 'departmentIds', 'projectIds', 'employeeIds'];
 
@@ -111,7 +116,7 @@ function groupOf(e: DayWithEmployee['employee'], by: ReportFilters['groupBy'], f
   return '';
 }
 
-function grouped<T>(items: T[], key: (t: T) => string): Map<string, T[]> {
+export function grouped<T>(items: T[], key: (t: T) => string): Map<string, T[]> {
   const m = new Map<string, T[]>();
   for (const i of items) m.set(key(i), [...(m.get(key(i)) ?? []), i]);
   return m;
@@ -199,8 +204,9 @@ export const REPORTS: ReportDefinition[] = [
       const columns: Column[] = [
         { key: 'code', label: 'Code' },
         { key: 'name', label: 'Employee' },
-        ...dates.map((d) => ({ key: d, label: d.slice(8), align: 'center' as const })),
-        ...['P', 'A', 'HD', 'L', 'R', 'H', 'WO', 'LT'].map((k) => ({ key: `t_${k}`, label: k, align: 'right' as const })),
+        ...dates.map((d) => ({ key: d, label: d.slice(8), align: 'center' as const, badge: true })),
+        ...['P', 'A', 'HD', 'L', 'R', 'H', 'WO', 'LT'].map((k, i) => ({ key: `t_${k}`, label: k, align: 'right' as const, divider: i === 0 })),
+        { key: 't_LD', label: 'Late ded.', align: 'right' },
         { key: 't_OT', label: 'OT h', align: 'right' },
       ];
       const rows = [...byEmp.values()].map((list) => {
@@ -217,6 +223,7 @@ export const REPORTS: ReportDefinition[] = [
           t_H: count('HOLIDAY'),
           t_WO: count('WEEKLY_OFF'),
           t_LT: list.filter((d) => d.isLate).length,
+          t_LD: lateDeductionDays(list.filter((d) => d.isLate).length, list[list.length - 1].policy as Record<string, unknown>),
           t_OT: Math.round(list.reduce((s, d) => s + d.overtimeMinutes, 0) / 6) / 10,
         });
         return row;
@@ -224,9 +231,15 @@ export const REPORTS: ReportDefinition[] = [
       // Big departments get their own sections so each starts on a fresh page.
       const byDept = grouped(rows, (r) => String(r.department));
       return {
-        kpis: Object.entries(STATUS_CODE)
-          .filter(([s]) => s !== 'PENDING')
-          .map(([s, code]) => ({ label: code, value: days.filter((d) => d.status === s).length })),
+        kpis: [
+          { label: 'Employees', value: byEmp.size },
+          { label: 'Present days', value: days.filter((d) => d.status === 'PRESENT' || d.status === 'REMOTE').length, tone: 'success' },
+          { label: 'Absent days', value: days.filter((d) => d.status === 'ABSENT').length, tone: 'danger' },
+          { label: 'Half days', value: days.filter((d) => d.status === 'HALF_DAY').length, tone: 'warning' },
+          { label: 'Leave days', value: days.filter((d) => d.status === 'ON_LEAVE').length + days.filter((d) => d.status === 'HALF_LEAVE').length / 2, tone: 'info' },
+          { label: 'Late arrivals', value: days.filter((d) => d.isLate).length, tone: 'warning' },
+          { label: 'Late penalty (days)', value: rows.reduce((s, r) => s + Number(r.t_LD), 0), tone: 'danger' },
+        ],
         sections: [...byDept].map(([title, list]) => ({ title: title || 'No department', columns, rows: list })),
       };
     },

@@ -39,6 +39,8 @@ export class OrgSettingsDto {
   @IsOptional() @IsHm() dayBoundary?: string;
   @IsOptional() @IsArray() @IsInt({ each: true }) @Min(0, { each: true }) @Max(6, { each: true }) defaultWeeklyOffs?: number[];
   @IsOptional() @IsBoolean() storePunchPhotos?: boolean;
+  /** Leaderboard: approved leave lowers attendance % (off = leave days are left out). */
+  @IsOptional() @IsBoolean() leaveCountsAgainstAttendance?: boolean;
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(3650) punchPhotoRetentionDays?: number;
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(3650) reportRetentionDays?: number;
   @IsOptional() @ValidateNested() @Type(() => BrandingDto) branding?: BrandingDto;
@@ -110,6 +112,8 @@ export class PolicyDto {
   @IsOptional() @Type(() => Number) @IsInt() @Min(0) @Max(60) roundingMinutes?: number;
   @IsOptional() @Type(() => Number) @IsInt() @Min(0) @Max(24) minRestHours?: number;
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(168) maxWeeklyHours?: number;
+  @IsOptional() @IsIn(['NONE', 'HALF_DAY', 'FULL_DAY']) lateDeduction?: string;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(31) lateDeductionEvery?: number;
 }
 
 /** Records audited through one helper to keep controllers flat. */

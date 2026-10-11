@@ -21,6 +21,12 @@ const MAX_FRAME_BYTES = 512 * 1024;
  * Engine.IO's own `destroyUpgradeTimeout`, whose job this takes over.
  */
 const UNCLAIMED_UPGRADE_TIMEOUT_MS = 1_000;
+/**
+ * A socket that has not logged in by now is dropped. The idle sweep only sees
+ * authenticated sessions, so without this a probe or a refused Register holds
+ * its socket open forever. A refused device simply redials 10s later.
+ */
+const LOGIN_DEADLINE_MS = 60_000;
 
 /**
  * Raw-WebSocket listener for M50 biometric terminals.
@@ -35,6 +41,8 @@ export class M50Server implements OnApplicationShutdown {
   private readonly wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
   private heartbeat?: NodeJS.Timeout;
   private attached = false;
+  /** Overridden by tests; see LOGIN_DEADLINE_MS. */
+  loginDeadlineMs = LOGIN_DEADLINE_MS;
 
   constructor(
     private readonly router: TerminalRouterService,
@@ -101,6 +109,13 @@ export class M50Server implements OnApplicationShutdown {
 
     this.logger.log(`Terminal connected from ${remote}`);
 
+    const loginDeadline = setTimeout(() => {
+      if (session.isAuthenticated) return;
+      this.logger.warn(`Dropping ${session.claimedSerialNo ?? remote}: no Login within ${this.loginDeadlineMs}ms`);
+      socket.terminate();
+    }, this.loginDeadlineMs);
+    loginDeadline.unref?.();
+
     socket.on('message', (data) => {
       session.lastMessageAt = Date.now();
       // Terminal traffic has no user: it runs as system and filters by the device's tenant itself.
@@ -116,6 +131,7 @@ export class M50Server implements OnApplicationShutdown {
     });
 
     socket.on('close', (code) => {
+      clearTimeout(loginDeadline);
       session.destroy(`connection closed (${code})`);
       if (session.context) {
         this.registry.remove(session.context.deviceId, session);

@@ -156,6 +156,21 @@ describe('M50Server alongside Socket.IO', () => {
     expect(terminal.readyState).toBe(WebSocket.OPEN);
   }, 15_000);
 
+  it('drops a socket that never logs in, but keeps one that does', async () => {
+    // The idle sweep only covers authenticated sessions; without a deadline a
+    // probe on this public path would hold its socket open forever.
+    server.loginDeadlineMs = 300;
+    (router.dispatch as jest.Mock).mockImplementationOnce(async (session) => session.authenticate({} as any));
+
+    const loggedIn = await connectTerminal();
+    loggedIn.send(encodeMessage({ Request: 'Login', DeviceSerialNo: 'DJ20250307014' }));
+    const silent = await connectTerminal();
+    const closed = new Promise((r) => silent.once('close', r));
+
+    await closed;
+    expect(loggedIn.readyState).toBe(WebSocket.OPEN);
+  });
+
   it('lets a session reply on the wire', async () => {
     const ws = await connectTerminal();
     // Reach into the live session the way a handler would.

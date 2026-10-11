@@ -1,4 +1,4 @@
-import { Button, Card, Checkbox, confirmAction, DataTable, DateInput, EmptyState, IconButton, PageHeader, Pagination, PillTabs, TextField } from '@iverto-org/core-ui';
+import { Badge, Button, Card, Switch, confirmAction, DataTable, DateInput, EmptyState, IconButton, PageHeader, Pagination, PillTabs, TextField } from '@iverto-org/core-ui';
 import { Download, FileSpreadsheet, FileText, Plus, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { EmployeePicker, FormModal, Panel, Pick, SitePicker, useForm } from '../components/ui';
@@ -6,8 +6,9 @@ import { del, downloadExport, patch, post, useAction, useApi, useDepartments, us
 import { isHr, isManager, useMe } from '../lib/auth';
 import { dateTime, REQUEST_STATUS, StatusBadge, today } from '../lib/format';
 import { awaitingDownload } from '../lib/live';
+import { CustomReports } from './ReportBuilder';
 
-interface ReportType { type: string; title: string; description: string; formats: ('csv' | 'pdf')[]; filters: string[]; maxDays: number }
+interface ReportType { type: string; title: string; description: string; formats: ('csv' | 'pdf')[]; filters: string[]; maxDays: number; custom?: boolean }
 interface Job { id: string; type: string; format: string; status: string; rowCount: number | null; sha256: string | null; error: string | null; createdAt: string; scheduleId: string | null }
 interface Schedule { id: string; name: string; type: string; format: 'csv' | 'pdf'; filters: Record<string, unknown>; cron: string; timezone: string; recipientUserIds: string[]; enabled: boolean; lastRunAt: string | null }
 
@@ -24,11 +25,12 @@ export function Reports() {
     <div className="space-y-6">
       <PageHeader title="Reports" subtitle="CSV and PDF are generated on the server from the same data you see on screen."
         filters={<PillTabs label="Section" value={tab} onChange={setTab} tabs={[
-          { value: 'export', label: 'Export' }, { value: 'history', label: 'Export history' }, ...(isManager(me) ? [{ value: 'schedules', label: 'Schedules' }] : []),
+          { value: 'export', label: 'Export' }, { value: 'history', label: 'Export history' }, ...(isManager(me) ? [{ value: 'schedules', label: 'Schedules' }] : []), ...(isHr(me) ? [{ value: 'custom', label: 'Custom reports' }] : []),
         ]} />} />
       {tab === 'export' && <ExportPanel onQueued={() => setTab('history')} />}
       {tab === 'history' && <History />}
       {tab === 'schedules' && <Schedules />}
+      {tab === 'custom' && <CustomReports />}
     </div>
   );
 }
@@ -65,7 +67,7 @@ function ExportPanel({ onQueued }: { onQueued: () => void }) {
             <div className="flex items-start gap-3">
               <FileText className="mt-0.5 shrink-0 text-brand" size={20} />
               <div>
-                <h3 className="font-bold text-fg">{t.title}</h3>
+                <h3 className="font-bold text-fg">{t.title} {t.custom && <Badge tone="brand">Custom</Badge>}</h3>
                 <p className="text-sm text-fg-muted">{t.description}</p>
                 <p className="mt-1 text-xs text-fg-subtle">{t.formats.map((x) => x.toUpperCase()).join(' · ')} · up to {t.maxDays} days</p>
               </div>
@@ -145,7 +147,7 @@ function Schedules() {
             { key: 't', header: 'Report', render: (s) => `${types?.find((t) => t.type === s.type)?.title ?? s.type} · ${s.format.toUpperCase()}` },
             { key: 'c', header: 'When', render: (s) => <span className="font-mono text-xs">{s.cron} ({s.timezone})</span> },
             { key: 'l', header: 'Last run', render: (s) => dateTime(s.lastRunAt) },
-            { key: 'e', header: 'Enabled', render: (s) => <span onClick={(e) => e.stopPropagation()}><Checkbox label={s.enabled ? 'On' : 'Off'} checked={s.enabled} onChange={() => toggle.mutate(s)} /></span> },
+            { key: 'e', header: 'Enabled', render: (s) => <span onClick={(e) => e.stopPropagation()}><Switch label={s.enabled ? 'On' : 'Off'} checked={s.enabled} onChange={() => toggle.mutate(s)} /></span> },
           ]}
           rowActions={(s) => <IconButton label="Remove schedule" icon={<Trash2 size={16} />} onClick={async (e) => { e.stopPropagation(); if (await confirmAction({ title: `Remove “${s.name}”?`, confirmLabel: 'Remove schedule' })) remove.mutate(s.id); }} />} />
       </Panel>
@@ -180,7 +182,7 @@ function ScheduleForm({ schedule, types, onClose }: { schedule?: Schedule; types
         <div className="space-y-2">
           <p className="field-label">Recipients</p>
           {users.filter((u) => u.status === 'ACTIVE').map((u) => (
-            <Checkbox key={u.userId} label={u.displayName} description={u.email} checked={f.recipientUserIds.includes(u.userId)} onChange={(e) => toggleRecipient(u.userId, e.target.checked)} />
+            <Switch key={u.userId} label={u.displayName} description={u.email} checked={f.recipientUserIds.includes(u.userId)} onChange={(on) => toggleRecipient(u.userId, on)} />
           ))}
         </div>
       )}

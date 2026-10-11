@@ -307,3 +307,13 @@ function liveStateOf(input: EngineInput, r: EngineResult, inside: boolean, final
   if (late > policy.graceInMinutes * MIN) return 'LATE_NOT_IN';
   return 'NOT_YET_IN';
 }
+
+/**
+ * Late penalty for a period (a month): every `lateDeductionEvery` late days
+ * deducts half or a full day of attendance. Reads a frozen policy snapshot.
+ */
+export function lateDeductionDays(lateDays: number, policy: { lateDeduction?: unknown; lateDeductionEvery?: unknown } | null | undefined): number {
+  const unit = policy?.lateDeduction === 'HALF_DAY' ? 0.5 : policy?.lateDeduction === 'FULL_DAY' ? 1 : 0;
+  const every = Number(policy?.lateDeductionEvery) || 0;
+  return unit && every >= 1 ? Math.floor(lateDays / every) * unit : 0;
+}

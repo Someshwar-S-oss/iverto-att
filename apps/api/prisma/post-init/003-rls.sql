@@ -37,7 +37,7 @@ BEGIN
     'attendance_policies','user_profiles','employees','devices','terminal_users',
     'terminal_face_templates','punches','attendance_days','attendance_corrections','shifts',
     'shift_patterns','employee_schedules','roster_overrides','leave_types','leave_ledger',
-    'leave_requests','remote_work_requests','report_jobs','report_schedules','push_devices',
+    'leave_requests','remote_work_requests','report_jobs','report_schedules','report_templates','push_devices',
     'app_notifications'
   ] LOOP
     EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', t);

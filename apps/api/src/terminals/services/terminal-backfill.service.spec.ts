@@ -23,7 +23,7 @@ describe('TerminalBackfillService', () => {
   const ingestedLogIds = () => ingest.ingestTimeLog.mock.calls.map(([, log]: [any, any]) => log.logId);
 
   async function build() {
-    ingest = { ingestTimeLog: jest.fn().mockResolvedValue({ enqueued: true }) };
+    ingest = { ingestTimeLog: jest.fn().mockResolvedValue({ inserted: true }) };
     const moduleRef = await Test.createTestingModule({
       providers: [
         TerminalBackfillService,
@@ -53,7 +53,7 @@ describe('TerminalBackfillService', () => {
       }
       return { Result: 'OK' };
     });
-    return { session: { command, requireContext: () => ctx } as any, seeks };
+    return { session: { command, requireContext: () => ctx } as any, seeks, ctx };
   }
 
   beforeEach(build);
@@ -116,5 +116,32 @@ describe('TerminalBackfillService', () => {
     const { session } = device(3, null);
     await Promise.all([service.run(session), service.run(session)]);
     expect(ingestedLogIds()).toEqual([1, 2, 3]);
+  });
+
+  it('does not skip the gap when a live scan advances the cursor mid-walk', async () => {
+    // Cursor at 4, records 5-10 buffered offline. LogID 10 arrives live while the
+    // walk is at 5: the shared cursor jumps to 10, and 6-9 must still be read.
+    const { session, ctx } = device(10, 4);
+    ingest.ingestTimeLog.mockImplementationOnce(async () => {
+      ctx.lastLogId = 10;
+      return { inserted: true };
+    });
+
+    await service.run(session);
+
+    expect(ingestedLogIds()).toEqual([5, 6, 7, 8, 9, 10]);
+  });
+
+  it('resumes from the cursor it started with, not one a live scan moved', async () => {
+    const { session, ctx } = device(10, 4);
+    const command = session.command.getMockImplementation();
+    session.command.mockImplementation(async (name: string, fields?: Record<string, unknown>) => {
+      if (name === M50Command.GetGlogPosInfo) ctx.lastLogId = 10;
+      return command(name, fields);
+    });
+
+    await service.run(session);
+
+    expect(ingestedLogIds()).toEqual([5, 6, 7, 8, 9, 10]);
   });
 });

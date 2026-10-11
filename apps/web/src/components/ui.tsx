@@ -1,5 +1,5 @@
 import {
-  Button, Card, Checkbox, ColorSwatchPicker, confirmAction, DateInput, Field, Modal, requestReason, SearchSelect, Select, TextField, Textarea, type SelectOption,
+  Button, Card, Switch, ColorSwatchPicker, confirmAction, DateInput, Field, Modal, requestReason, SearchSelect, Select, TextField, Textarea, type SelectOption,
 } from '@iverto-org/core-ui';
 import { useId, useState, type MouseEvent, type ReactNode } from 'react';
 import { post, useAction, useDepartments, useEmployeeOptions, useSites } from '../lib/api';
@@ -121,7 +121,7 @@ export function Fields({ specs, form, set }: { specs: FieldSpec[]; form: Record<
         const v = form[s.key];
         switch (s.type) {
           case 'bool':
-            return <Checkbox key={s.key} label={s.label} description={s.hint} checked={Boolean(v)} onChange={(e) => set(s.key)(e.target.checked)} />;
+            return <Switch key={s.key} label={s.label} description={s.hint} checked={Boolean(v)} onChange={set(s.key)} />;
           case 'select':
             return <Pick key={s.key} label={s.label} hint={s.hint} required={s.required} placeholder={s.placeholder ?? 'Search…'} options={s.options ?? []} value={v ?? ''} onChange={set(s.key)} />;
           case 'color':
@@ -132,8 +132,8 @@ export function Fields({ specs, form, set }: { specs: FieldSpec[]; form: Record<
                 {() => (
                   <div className="flex flex-wrap gap-3">
                     {WEEKDAYS.map((d, i) => (
-                      <Checkbox key={d} label={d} checked={(v ?? []).includes(i)}
-                        onChange={(e) => set(s.key)(e.target.checked ? [...(v ?? []), i].sort() : (v ?? []).filter((x: number) => x !== i))} />
+                      <Switch key={d} label={d} checked={(v ?? []).includes(i)}
+                        onChange={(on) => set(s.key)(on ? [...(v ?? []), i].sort() : (v ?? []).filter((x: number) => x !== i))} />
                     ))}
                   </div>
                 )}

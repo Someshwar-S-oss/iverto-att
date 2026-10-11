@@ -1,4 +1,4 @@
-import { Badge, Button, Callout, Card, Checkbox, confirmAction, DataTable, DateInput, EmptyState, FileDropzone, IconButton, Modal, PageHeader, SearchInput, Select, TextField } from '@iverto-org/core-ui';
+import { Badge, Button, Callout, Card, Switch, confirmAction, DataTable, DateInput, EmptyState, FileDropzone, IconButton, Modal, PageHeader, SearchInput, Select, TextField } from '@iverto-org/core-ui';
 import { Download, MapPin, Plus, Trash2, Upload } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { FormModal, Panel, useForm } from '../components/ui';
@@ -101,9 +101,9 @@ function SiteChecklist({ sites, calendars, selected, onChange, calendarId }: { s
         {shown.map((s) => {
           const other = s.holidayCalendarId && s.holidayCalendarId !== calendarId ? calendars.find((c) => c.id === s.holidayCalendarId)?.name : null;
           return (
-            <Checkbox key={s.id} label={s.name} checked={selected.includes(s.id)}
+            <Switch key={s.id} label={s.name} checked={selected.includes(s.id)}
               description={[s.timezone, other && `moves here from “${other}”`].filter(Boolean).join(' · ')}
-              onChange={(e) => onChange(e.target.checked ? [...selected, s.id] : selected.filter((x) => x !== s.id))} />
+              onChange={(on) => onChange(on ? [...selected, s.id] : selected.filter((x) => x !== s.id))} />
           );
         })}
       </div>

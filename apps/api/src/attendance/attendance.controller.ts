@@ -10,6 +10,7 @@ import { AppError } from '../common/errors';
 import { PrismaService } from '../common/prisma.service';
 import { dbDate, diffDays, eachDay, monthRange, ymdOf } from '../common/time';
 import { IsMonth, IsYmd } from '../common/validators';
+import { lateDeductionDays } from './engine/compute-day';
 import { presentDay, presentPunch, statusCode } from './present';
 import { RecomputeQueue } from './recompute.service';
 
@@ -163,7 +164,7 @@ export class AttendanceController {
       workDate: { gte: dbDate(from), lte: dbDate(to) },
       employee: await scopedEmployees(this.scope, user, q, from, to),
     };
-    const [byEmployeeStatus, sums, lates, byDay, employees] = await Promise.all([
+    const [byEmployeeStatus, sums, lates, byDay, employees, policies] = await Promise.all([
       this.prisma.attendanceDay.groupBy({ by: ['employeeId', 'status'], where, _count: { _all: true } }),
       this.prisma.attendanceDay.groupBy({
         by: ['employeeId'],
@@ -177,16 +178,20 @@ export class AttendanceController {
         select: { id: true, fullName: true, employeeCode: true, departmentId: true, siteId: true },
         orderBy: { fullName: 'asc' },
       }),
+      // The latest day's frozen policy decides the month's late deduction.
+      this.prisma.attendanceDay.findMany({ where, distinct: ['employeeId'], orderBy: [{ employeeId: 'asc' }, { workDate: 'desc' }], select: { employeeId: true, policy: true } }),
     ]);
 
     const totals = employees.map((e) => {
       const counts = Object.fromEntries(STATUSES.map((s) => [s, 0]));
       for (const r of byEmployeeStatus) if (r.employeeId === e.id) counts[r.status] = r._count._all;
       const s = sums.find((x) => x.employeeId === e.id)?._sum;
+      const lateDays = lates.find((x) => x.employeeId === e.id)?._count._all ?? 0;
       return {
         employee: e,
         counts,
-        lateDays: lates.find((x) => x.employeeId === e.id)?._count._all ?? 0,
+        lateDays,
+        lateDeductionDays: lateDeductionDays(lateDays, policies.find((x) => x.employeeId === e.id)?.policy as Record<string, unknown>),
         workedMinutes: s?.workedMinutes ?? 0,
         overtimeMinutes: s?.overtimeMinutes ?? 0,
         lateMinutes: s?.lateMinutes ?? 0,

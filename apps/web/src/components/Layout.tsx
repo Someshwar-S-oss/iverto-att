@@ -1,7 +1,7 @@
 import { AppShell, Kbd, type NavGroup } from '@iverto-org/core-ui';
 import {
   Activity, BarChart3, CalendarDays, CalendarRange, ClipboardCheck, Clock, Cpu, Home, LogOut, Plane, ScanFace, Search,
-  Settings, Sun, TableProperties, Users, Building2, ArrowLeftRight, Repeat,
+  Settings, Sun, TableProperties, Trophy, Users, Building2, ArrowLeftRight, Repeat,
 } from 'lucide-react';
 import { Outlet, useLocation, useNavigate } from 'react-router';
 import { isHr, isManager, useAuth, useMe } from '../lib/auth';
@@ -31,7 +31,10 @@ export function Layout() {
         ...(mgr ? [{ label: 'Live board', hint: 'Who is in right now', icon: icon(Activity), href: '/live' }] : []),
         { label: 'Daily status', hint: 'Attendance by day', icon: icon(CalendarDays), href: '/attendance/daily' },
         { label: 'Daily logs', hint: 'Every punch', icon: icon(Clock), href: '/attendance/logs' },
-        ...(mgr ? [{ label: 'Overview', hint: 'Month & muster roll', icon: icon(TableProperties), href: '/attendance/overview' }] : []),
+        ...(mgr ? [
+          { label: 'Overview', hint: 'Month & muster roll', icon: icon(TableProperties), href: '/attendance/overview' },
+          { label: 'Leaderboard', hint: 'Attendance & late ranking', icon: icon(Trophy), href: '/attendance/leaderboard' },
+        ] : []),
         { label: 'Corrections', hint: 'Missed punches', icon: icon(ClipboardCheck), href: '/attendance/corrections' },
       ],
     },

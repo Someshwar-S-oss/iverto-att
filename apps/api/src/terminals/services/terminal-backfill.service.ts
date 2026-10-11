@@ -11,7 +11,7 @@ const MAX_RECORDS_PER_RUN = 20_000;
  *
  * Only used when the device will not say how many logs it holds, which is the
  * one case the search below cannot run. Reading a few records we already have
- * is free — the per-record guard drops them. Reading a few too few is not.
+ * is free — the punch unique key drops them. Reading a few too few is not.
  */
 const RESUME_OVERLAP = 16;
 
@@ -71,7 +71,7 @@ export class TerminalBackfillService {
     lastPos: number | null,
   ): Promise<number | null> {
     // No LogCount means no range to search in. Guess, erring backwards: the
-    // per-record guard makes re-reading harmless, and under-reading does not
+    // punch unique key makes re-reading harmless, and under-reading does not
     // announce itself.
     if (lastPos === null) return Math.max(0, lastLogId - RESUME_OVERLAP);
     if (lastPos < 0) return null;
@@ -102,6 +102,9 @@ export class TerminalBackfillService {
 
   private async walk(session: M50Session): Promise<void> {
     const context = session.requireContext();
+    // Snapshot before the first await: live scans advance context.lastLogId
+    // concurrently, and resuming from their LogID would skip the gap we are here for.
+    const cursor = context.lastLogId;
 
     const posInfo = await session.command(M50Command.GetGlogPosInfo).catch((err) => {
       this.logger.warn(`GetGlogPosInfo failed on ${context.serialNo}: ${err.message}`);
@@ -113,10 +116,10 @@ export class TerminalBackfillService {
     // A device with no cursor yet is walked from the start so its existing
     // history is imported.
     let position = 0;
-    if (context.lastLogId !== null) {
-      const found = await this.findResumePosition(session, context.lastLogId, lastPos);
+    if (cursor !== null) {
+      const found = await this.findResumePosition(session, cursor, lastPos);
       if (found === null) {
-        this.logger.log(`Terminal ${context.serialNo} has nothing past LogID ${context.lastLogId}`);
+        this.logger.log(`Terminal ${context.serialNo} has nothing past LogID ${cursor}`);
         return;
       }
       position = found;
@@ -125,7 +128,7 @@ export class TerminalBackfillService {
     if (posInfo?.LogCount !== undefined) {
       this.logger.log(
         `Terminal ${context.serialNo} holds ${posInfo.LogCount} logs; ` +
-          `cursor at LogID ${context.lastLogId ?? 'none'}, resuming from position ${position}`,
+          `cursor at LogID ${cursor ?? 'none'}, resuming from position ${position}`,
       );
     }
 
@@ -137,15 +140,13 @@ export class TerminalBackfillService {
       try {
         const log = parseTimeLog(fields);
 
-        // The live stream may have overtaken the walk, and the overlap above
-        // deliberately re-reads records we already have, so re-check the cursor
-        // per record. This is what makes reading too much harmless.
-        if (context.lastLogId !== null && log.logId <= context.lastLogId) {
-          skipped++;
-        } else {
-          await this.ingest.ingestTimeLog(context, log);
-          imported++;
-        }
+        // Always ingest; the punch unique key (device, LogID, time) drops records
+        // we already have, which is what makes reading too much harmless. Never
+        // skip on the cursor: it is shared with the live stream, so one live scan
+        // during the walk would jump it past every record still to be read here.
+        const { inserted } = await this.ingest.ingestTimeLog(context, log);
+        if (inserted) imported++;
+        else skipped++;
       } catch (err) {
         this.logger.warn(
           `Skipping unparseable backfill record from ${context.serialNo}: ${(err as Error).message}`,

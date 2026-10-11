@@ -19,17 +19,17 @@ interface DayDetail extends Omit<Day, 'remote'> {
 
 /** Segments against the scheduled shift, on one bar. */
 function Timeline({ day }: { day: DayDetail }) {
-  const points = [day.schedStart, day.schedEnd, ...day.segments.flatMap((s) => [s.in, s.out])].filter(Boolean).map((t) => new Date(t!).getTime());
+  const now = new Date().toISOString();
+  const points = [day.schedStart, day.schedEnd, ...day.segments.flatMap((s) => [s.in, s.out ?? now])].filter(Boolean).map((t) => new Date(t!).getTime());
   if (!points.length) return null;
   const pad = 30 * 60_000;
   const start = Math.min(...points) - pad;
   const span = Math.max(...points) + pad - start;
-  const pct = (iso: string) => `${((new Date(iso).getTime() - start) / span) * 100}%`;
-  const width = (a: string, b: string) => `${((new Date(b).getTime() - new Date(a).getTime()) / span) * 100}%`;
-  const now = new Date().toISOString();
+  const pct = (iso: string) => `${Math.min(100, Math.max(0, ((new Date(iso).getTime() - start) / span) * 100))}%`;
+  const width = (a: string, b: string) => `${Math.min(100, Math.max(0, ((new Date(b).getTime() - new Date(a).getTime()) / span) * 100))}%`;
   return (
     <div>
-      <div className="relative h-8 rounded-full bg-surface-muted">
+      <div className="relative h-8 overflow-hidden rounded-full bg-surface-muted">
         {day.schedStart && day.schedEnd && (
           <div className="absolute inset-y-0 rounded-full border-2 border-dashed border-line-strong" style={{ left: pct(day.schedStart), width: width(day.schedStart, day.schedEnd) }} title="Scheduled shift" />
         )}

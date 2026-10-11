@@ -31,6 +31,7 @@ SELECT pg_temp.add_check('remote_work_requests', 'remote_work_requests_status_ch
 SELECT pg_temp.add_check('remote_work_requests', 'remote_work_requests_range_chk', $$end_date >= start_date$$);
 SELECT pg_temp.add_check('attendance_corrections', 'attendance_corrections_status_chk', $$status IN ('PENDING','APPROVED','REJECTED','CANCELLED')$$);
 SELECT pg_temp.add_check('attendance_corrections', 'attendance_corrections_some_time_chk', $$in_at IS NOT NULL OR out_at IS NOT NULL$$);
+SELECT pg_temp.add_check('attendance_policies', 'attendance_policies_late_deduction_chk', $$late_deduction IN ('NONE','HALF_DAY','FULL_DAY') AND late_deduction_every >= 1$$);
 SELECT pg_temp.add_check('report_jobs', 'report_jobs_format_chk', $$format IN ('csv','pdf')$$);
 
 -- No overlapping live requests / schedules per employee: a DB constraint, not app code (§8.2).

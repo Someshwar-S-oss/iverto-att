@@ -10,6 +10,7 @@ import { AuthProvider, isManager, useAuth, useMe } from './lib/auth';
 import { Login, SetPassword, Suspended } from './pages/Auth';
 import { Corrections, Daily, Logs, Overview } from './pages/Attendance';
 import { EmployeeDetail, Employees } from './pages/Employees';
+import { Leaderboard } from './pages/Leaderboard';
 import { Leave, RemoteWork } from './pages/Leave';
 import { Live } from './pages/Live';
 import { TenantDetail, Tenants } from './pages/Platform';
@@ -56,6 +57,7 @@ const router = createBrowserRouter([
           { path: 'attendance/logs', element: <Logs /> },
           { path: 'attendance/overview', element: <Overview /> },
           { path: 'attendance/corrections', element: <Corrections /> },
+          { path: 'attendance/leaderboard', element: <Leaderboard /> },
           { path: 'employees', element: <Employees /> },
           { path: 'employees/:id', element: <EmployeeDetail /> },
           { path: 'schedule/shifts', element: <Shifts /> },

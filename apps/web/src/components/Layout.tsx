@@ -1,6 +1,6 @@
 import { AppShell, Kbd, type NavGroup } from '@iverto-org/core-ui';
 import {
-  Activity, BarChart3, CalendarDays, CalendarRange, ClipboardCheck, Clock, Cpu, Home, LogOut, Plane, ScanFace, Search,
+  Activity, BarChart3, CalendarDays, CalendarRange, ClipboardCheck, Clock, Cpu, Home, LogOut, MapPin, Plane, ScanFace, Search,
   Settings, Sun, TableProperties, Trophy, Users, Building2, ArrowLeftRight, Repeat,
 } from 'lucide-react';
 import { Outlet, useLocation, useNavigate } from 'react-router';
@@ -43,6 +43,7 @@ export function Layout() {
       items: [
         { label: 'Leave', hint: 'Requests & balances', icon: icon(Plane), href: '/leave/requests' },
         { label: 'Remote work', hint: 'Working away from site', icon: icon(Home), href: '/remote-work' },
+        ...(mgr ? [{ label: 'Remote check-ins', hint: 'Review selfie & GPS punches', icon: icon(MapPin), href: '/remote-work/check-ins' }] : []),
       ],
     },
     ...(mgr

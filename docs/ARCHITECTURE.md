@@ -1076,6 +1076,8 @@ CORS_ORIGIN
 STORAGE_BUCKET_REPORTS=reports
 STORAGE_BUCKET_UPLOADS=uploads
 STORAGE_BUCKET_PUNCH_PHOTOS=punch-photos
+AZURE_STORAGE_CONNECTION_STRING=   # mobile check-in selfies; must include AccountKey (SAS links)
+AZURE_STORAGE_CONTAINER_SELFIES=punch-selfies
 M50_WS_PATH=/m50                                  # path the APP receives (see hostel troubleshooting)
 M50_CLOUD_ID=                                      # optional second factor
 FIREBASE_SERVICE_ACCOUNT=                          # optional; NoOp push when unset

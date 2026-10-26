@@ -27,14 +27,18 @@ export class NotificationsService {
     private readonly live: LiveGateway,
   ) {
     const account = process.env.FIREBASE_SERVICE_ACCOUNT;
-    if (!account) return;
     try {
-      const json = JSON.parse(account.trim().startsWith('{') ? account : Buffer.from(account, 'base64').toString('utf8'));
-      if (!getApps().length) initializeApp({ credential: cert(json) });
-      this.fcm = getMessaging();
+      if (account) {
+        const json = JSON.parse(account.trim().startsWith('{') ? account : Buffer.from(account, 'base64').toString('utf8'));
+        // The app's tokens are issued for iverto-attend only; any other project fails every send.
+        if (json.project_id !== 'iverto-attend') throw new Error(`service account is for ${json.project_id}, expected iverto-attend`);
+        if (!getApps().length) initializeApp({ credential: cert(json) });
+        this.fcm = getMessaging();
+      }
     } catch (err) {
       this.logger.error(`FCM disabled: ${(err as Error).message}`);
     }
+    this.logger.log(this.fcm ? 'push: FCM (iverto-attend)' : 'push: NoOp');
   }
 
   /** Never throws: a failed notification must not fail the action that caused it. */
@@ -48,31 +52,38 @@ export class NotificationsService {
             data: { tenantId, userId, type: n.type, title: n.title, body: n.body, data: (n.data ?? {}) as Prisma.InputJsonValue },
           });
           this.live.emitToUser('notification.new', userId, row);
+          // Inbox first; a failed push never undoes the row or the action.
+          await this.push(tenantId, userId, row.id, n).catch((err) => this.logger.warn(`Push ${n.type} failed: ${(err as Error).message}`));
         }
-        await this.push(ids, n);
       });
     } catch (err) {
       this.logger.warn(`Notification ${n.type} failed: ${(err as Error).message}`);
     }
   }
 
-  private async push(userIds: string[], n: NotificationInput) {
-    const devices = await this.prisma.pushDevice.findMany({ where: { userId: { in: userIds }, active: true } });
+  /** One user's devices (≤500 per user in practice, so one multicast). See docs/fcm_server_changes.md §5–7. */
+  private async push(tenantId: string, userId: string, notificationId: string, n: NotificationInput) {
+    const devices = await this.prisma.pushDevice.findMany({ where: { tenantId, userId, active: true } });
     if (!devices.length) return;
     if (!this.fcm) {
       this.logger.debug(`[no FCM] ${n.type} → ${devices.length} device(s)`);
       return;
     }
     const tokens = devices.map((d) => d.token);
+    // ponytail: no retry queue for transient FCM errors; the inbox row is the fallback.
     const res = await this.fcm.sendEachForMulticast({
       tokens,
       notification: { title: n.title, body: n.body },
-      data: { type: n.type, ...(n.data ?? {}) },
-      android: { priority: 'high', notification: { channelId: 'default' } },
+      data: { ...(n.data ?? {}), type: n.type, notificationId },
+      android: { priority: 'high', ttl: pushTtl(n.type), notification: { channelId: 'default', tag: notificationId } },
     });
-    const dead = res.responses
-      .map((r, i) => (!r.success && /not-registered|invalid-registration/.test(r.error?.code ?? '') ? tokens[i] : null))
-      .filter((t): t is string => Boolean(t));
+    const dead: string[] = [];
+    res.responses.forEach((r, i) => {
+      if (r.success) return;
+      const code = r.error?.code ?? '';
+      if (DEAD_TOKEN.has(code)) dead.push(tokens[i]);
+      else this.logger.warn(`Push ${n.type} failed: ${code} ${r.error?.message ?? ''}`);
+    });
     if (dead.length) await this.prisma.pushDevice.updateMany({ where: { token: { in: dead } }, data: { active: false } });
   }
 
@@ -98,7 +109,8 @@ export class NotificationsService {
     const approvers = await this.approversFor(tenantId, employeeId, hrOnly);
     for (const userId of approvers) this.live.emitToUser('approval.pending', userId, { type, id });
     await this.notify(tenantId, approvers, {
-      type: 'APPROVAL_PENDING',
+      // The app opens LEAVE_/CORRECTION_/REMOTE_…_SUBMITTED in the approver view.
+      type: `${type.toUpperCase()}_SUBMITTED`,
       title: `New ${type} request`,
       body: `${who} is waiting for your decision`,
       data: { requestType: type, id },
@@ -131,17 +143,39 @@ export class NotificationsService {
     });
   }
 
-  registerDevice(tenantId: string, userId: string, platform: string, token: string) {
-    return this.prisma.pushDevice.upsert({
-      where: { token },
-      update: { tenantId, userId, platform, active: true, lastSeenAt: new Date() },
-      create: { tenantId, userId, platform, token },
-    });
+  /**
+   * Upsert on the token: a handed-over phone moves to the caller. As system, because
+   * a row still owned by another tenant is invisible under RLS and the insert would
+   * hit the unique index.
+   */
+  async registerDevice(tenantId: string, userId: string, platform: string, token: string) {
+    await runAsSystem(() =>
+      this.prisma.pushDevice.upsert({
+        where: { token },
+        update: { tenantId, userId, platform, active: true, lastSeenAt: new Date() },
+        create: { tenantId, userId, platform, token },
+      }),
+    );
+    return { status: 'registered' };
   }
 
   unregisterDevice(userId: string, token: string) {
     return this.prisma.pushDevice.updateMany({ where: { userId, token }, data: { active: false } });
   }
+}
+
+const DEAD_TOKEN = new Set([
+  'messaging/registration-token-not-registered',
+  'messaging/invalid-registration-token',
+  'messaging/mismatched-credential',
+]);
+
+const HOUR = 3_600_000;
+/** Reminders are pointless the next day; requests and outcomes keep for 3 days. */
+function pushTtl(type: string): number {
+  if (/MISSED|LATE|ABSENT/.test(type)) return 12 * HOUR;
+  if (/REPORT|DEVICE/.test(type)) return 24 * HOUR;
+  return 72 * HOUR;
 }
 
 @Global()

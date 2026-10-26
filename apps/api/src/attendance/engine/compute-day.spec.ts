@@ -195,8 +195,26 @@ describe('computeAttendanceDay (§6.7)', () => {
       ['18:30', [p('09:00', 'in'), p('18:00', 'out')], 'LEFT'],
     ] as Array<[string, EnginePunch[], string]>)('at %s → %s', (now, punches, liveState) => {
       const r = run({ punches, now: t(now) });
-      expect(r.status).toBe('PENDING');
+      expect(r.status).toBe(liveState === 'ABSENT' ? 'ABSENT' : 'PENDING');
       expect(r.liveState).toBe(liveState);
+    });
+
+    test('arriving after the absent mark lifts it', () => {
+      expect(run({ punches: [p('12:00', 'in')], now: t('13:00') })).toMatchObject({ status: 'PENDING', liveState: 'IN_LATE' });
+    });
+
+    const firstHalf = { portion: 0.5, half: 'FIRST', leaveTypeId: 'CL' } as const;
+    test.each([
+      ['12:00', 'ON_LEAVE', 'PENDING'],
+      ['13:45', 'LATE_NOT_IN', 'PENDING'], // due 13:30 (mid-shift)
+      ['15:30', 'ABSENT', 'ABSENT'],
+    ])('first half on leave, no-show at %s → %s', (now, liveState, status) => {
+      expect(run({ leave: firstHalf, now: t(now) })).toMatchObject({ liveState, status });
+    });
+
+    test('second half on leave, no-show is absent from the morning', () => {
+      const leave = { portion: 0.5, half: 'SECOND', leaveTypeId: 'CL' } as const;
+      expect(run({ leave, now: t('11:30') })).toMatchObject({ liveState: 'ABSENT', status: 'ABSENT' });
     });
 
     test('worked so far counts the open segment', () => {

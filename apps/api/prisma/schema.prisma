@@ -296,7 +296,11 @@ model Punch {
   correctionId   String?   @map("correction_id")
   reason         String?
   createdBy      String?   @map("created_by")
-  photoKey       String?   @map("photo_key")
+  photoKey       String?   @map("photo_key") // Azure blob key of the MOBILE selfie
+  reviewStatus   String?   @map("review_status") // MOBILE only: PENDING | APPROVED | REJECTED
+  reviewedBy     String?   @map("reviewed_by")
+  reviewedAt     DateTime? @map("reviewed_at")
+  reviewNote     String?   @map("review_note")
   receivedAt     DateTime  @default(now()) @map("received_at")
 
   employee Employee? @relation(fields: [employeeId], references: [id])
@@ -307,6 +311,7 @@ model Punch {
   @@index([employeeId, punchedAt])
   @@index([siteId, punchedAt])
   @@index([tenantId, punchedAt])
+  @@index([tenantId, reviewStatus, punchedAt])
   @@map("punches")
 }
 

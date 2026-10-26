@@ -395,8 +395,10 @@ Detailed inspection for an individual day (formatted `YYYY-MM-DD`). Includes pai
 ```http
 POST /v1/mobile/punches
 ```
-Records an in-app remote/field check-in.
+Records an in-app remote/field check-in: a geo-tagged selfie plus the GPS fix.
 - **Authorization**: Allowed if employee policy is `ALWAYS`, or `REMOTE_DAYS` with approved remote work today.
+- **Selfie (required)**: `selfieBase64` is a base64 JPEG taken with the front camera at the moment of the punch, at most **2 MB** decoded (resize to ~720 px wide, quality 80 is plenty). Non-JPEG → `400 FILE_TYPE_MISMATCH`; too large → `413 FILE_TOO_LARGE`. The server stores it in a private Azure Blob container; the app never talks to Azure directly.
+- **Review**: Every mobile punch is created with `reviewStatus: "PENDING"` and counts towards the day immediately. A manager/HR/admin then approves or rejects it; a rejected punch (`reviewStatus: "REJECTED"`, `outcome: "DENIED"`) drops out of the day's attendance and the employee receives a `MOBILE_PUNCH_REJECTED` notification. `GET /v1/mobile/today` and `/v1/mobile/attendance/:date` return `reviewStatus` / `reviewNote` on each punch so the app can show the state.
 - **Server Timestamp**: The server's timestamp is authoritative; `clientTime` is preserved strictly for diagnostic audit.
 - **Idempotency**: Pass `Idempotency-Key` to safely handle poor network connections.
 
@@ -408,7 +410,8 @@ Records an in-app remote/field check-in.
   "lng": 73.85674,
   "accuracy": 12.5,
   "isMockLocation": false,
-  "clientTime": "2026-03-30T09:00:15.000Z"
+  "clientTime": "2026-03-30T09:00:15.000Z",
+  "selfieBase64": "/9j/4AAQSkZJRgABAQ..."
 }
 ```
 
@@ -422,7 +425,8 @@ Records an in-app remote/field check-in.
   "source": "MOBILE",
   "lat": 18.52043,
   "lng": 73.85674,
-  "accuracy": 12.5
+  "accuracy": 12.5,
+  "reviewStatus": "PENDING"
 }
 ```
 
@@ -907,3 +911,75 @@ Rejects application with a mandatory note explaining the rationale.
   "decisionNote": "Insufficient shift coverage on selected dates"
 }
 ```
+
+---
+
+### 10.6 Attendance Leaderboard
+There is no `/v1/mobile/leaderboard` route. The web leaderboard ranks people **on the client** from two shared (non-mobile) endpoints. A mobile client should do the same.
+
+> **Base path**: these routes are under `/v1`, not `/v1/mobile` (e.g. `https://<api-domain>/att/v1/attendance/overview`). The same Bearer token works.
+>
+> **Scope**: rows are limited to what the caller can see. `ADMIN`/`HR` see the whole tenant, `MANAGER` sees self + direct reports + departments they head, and `EMPLOYEE` sees only their own row. Site-restricted users only see their sites.
+
+#### Step 1: Monthly totals
+```http
+GET /v1/attendance/overview?month=2026-03&siteId=&departmentId=
+```
+- `month` (required): `YYYY-MM`.
+- `siteId`, `departmentId` (optional): filters.
+
+Use `totals[]` and ignore `distribution`. Only employees with at least one attendance day in the month are returned.
+
+```json
+{
+  "totals": [
+    {
+      "employee": {
+        "id": "88cfc843-e6ef-4613-8991-ecff02a9e334",
+        "fullName": "Rahul Sharma",
+        "employeeCode": "EMP-0412",
+        "departmentId": "dep-ops",
+        "siteId": "site-blr"
+      },
+      "counts": {
+        "PENDING": 2, "PRESENT": 18, "HALF_DAY": 1, "ABSENT": 1, "ON_LEAVE": 1,
+        "HALF_LEAVE": 0, "REMOTE": 1, "HOLIDAY": 1, "WEEKLY_OFF": 5
+      },
+      "lateDays": 4,
+      "lateDeductionDays": 1,
+      "workedMinutes": 10120,
+      "overtimeMinutes": 240,
+      "lateMinutes": 85,
+      "earlyExitMinutes": 0
+    }
+  ],
+  "distribution": [ { "date": "2026-03-01", "counts": { "PRESENT": 20 } } ]
+}
+```
+- `lateDays`: days flagged late.
+- `lateDeductionDays`: late penalty in days. Computed server-side as `floor(lateDays / lateDeductionEvery) × (0.5 for HALF_DAY | 1 for FULL_DAY)` using the policy frozen on the employee's latest day of the month. It is `0` when the policy's `lateDeduction` is `NONE`.
+
+#### Step 2: Leave setting
+```http
+GET /v1/org
+```
+Read `settings.leaveCountsAgainstAttendance` (boolean, default `false`). Department names come from `GET /v1/departments`.
+
+#### Step 3: Score and rank (client-side)
+Let `c = counts` (missing key = 0). Sum these over one employee, or over every employee in a department for the department view:
+
+| Field | Formula |
+|---|---|
+| `working` | `PRESENT + REMOTE + HALF_DAY + ABSENT` + (`leaveCounts` ? `ON_LEAVE + HALF_LEAVE` : `HALF_LEAVE / 2`) |
+| `present` | `PRESENT + REMOTE + (HALF_DAY + HALF_LEAVE) / 2` |
+| `leave` | `ON_LEAVE + HALF_LEAVE / 2` |
+| `absent` | `ABSENT + HALF_DAY / 2` |
+| `turnedUp` | `PRESENT + REMOTE + HALF_DAY + HALF_LEAVE` |
+| `attendancePct` | `max(0, present − Σ lateDeductionDays) / working × 100`, or `null` when `working = 0` |
+| `latePct` | `min(100, Σ lateDays / turnedUp × 100)`, or `0` when `turnedUp = 0` |
+
+`PENDING` (today and future days), `HOLIDAY` and `WEEKLY_OFF` are left out. Unapproved absences are `ABSENT` and always count.
+
+**Sort order**: highest `attendancePct` first. Ties go to the lower `latePct`. A `null` attendance ranks last. Rank is the 1-based position after sorting.
+
+Reference implementation: `apps/web/src/lib/leaderboard.ts` (`score`, `byRank`).

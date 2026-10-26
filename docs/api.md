@@ -1070,6 +1070,11 @@ Workflow for remote work permissions enabling mobile GPS punch authorization.
 - `POST /v1/remote-work/requests/:id/reject`: Reject application.
 - `POST /v1/remote-work/requests/:id/cancel`: Cancel remote authorization.
 
+Mobile check-in review (ADMIN / HR / MANAGER, scoped like the rest). Each `MOBILE` punch carries a selfie (Azure Blob) and GPS, and starts `PENDING`; it counts immediately, and a rejection sets `outcome: DENIED` and recomputes the day.
+- `GET /v1/remote-work/punches?status=PENDING|APPROVED|REJECTED&employeeId=&from=&to=&cursor=&limit=`: Check-ins newest first; each row is a punch plus `selfieUrl` (read-only SAS link, valid 1 hour). Omit `status` for all.
+- `POST /v1/remote-work/punches/:id/approve`: Body `{ "note"?: string }`.
+- `POST /v1/remote-work/punches/:id/reject`: Body `{ "note": string }` (required); the employee is notified. Only `PENDING` check-ins can be decided (`409 ALREADY_DECIDED`).
+
 #### Remote Work Request Payload
 ```json
 {

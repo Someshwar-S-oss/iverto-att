@@ -1,4 +1,4 @@
-import { Badge, Button, Callout, DataTable, DateInput, EmptyState, ListFooter, PageHeader, PillTabs, Select, Textarea, TextField } from '@iverto-org/core-ui';
+import { Badge, Button, Callout, DataTable, DateInput, DescriptionList, EmptyState, ListFooter, Modal, PageHeader, PillTabs, Select, Textarea, TextField } from '@iverto-org/core-ui';
 import { Plus, SlidersHorizontal } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router';
@@ -7,6 +7,7 @@ import { clean, Decide, EmployeePicker, FormModal, Panel, Pick, useForm } from '
 import { post, useAction, useApi, useCursor, useLeaveTypes, type LeaveType } from '../lib/api';
 import { isHr, isManager, useMe } from '../lib/auth';
 import { REQUEST_STATUS, StatusBadge, today } from '../lib/format';
+import type { Punch } from '../lib/live';
 
 interface LeaveRequest {
   id: string; employeeId: string; employee: { fullName: string; employeeCode: string }; leaveType: { code: string; name: string; color: string | null };
@@ -257,6 +258,68 @@ export function RemoteWork() {
         </div>
         <Textarea label="Reason" maxLength={1000} value={f.reason} onChange={(e) => set('reason')(e.target.value)} />
       </FormModal>
+    </div>
+  );
+}
+
+interface CheckIn extends Punch {
+  lat: number; lng: number; accuracy: number | null; isMockLocation: boolean | null;
+  reviewStatus: string; reviewNote: string | null; selfieUrl: string | null;
+}
+
+const REVIEW_TABS = ['PENDING', 'APPROVED', 'REJECTED'];
+const where = (r: CheckIn) => `${r.lat.toFixed(5)}, ${r.lng.toFixed(5)}${r.accuracy != null ? ` ±${Math.round(r.accuracy)} m` : ''}`;
+
+/** Mobile check-ins (selfie + GPS) waiting for a manager's eye. */
+export function RemoteCheckIns() {
+  const me = useMe();
+  const [status, setStatus] = useState('PENDING');
+  const [openId, setOpenId] = useState<string | null>(null);
+  const list = useCursor<CheckIn>('/remote-work/punches', status === 'ALL' ? {} : { status });
+  // Derived from the list, so the modal closes once a decision moves the row off this tab.
+  const open = list.rows.find((r) => r.id === openId);
+  const canDecide = (r: CheckIn) => r.reviewStatus === 'PENDING' && r.employeeId !== me.employeeId;
+  return (
+    <div className="space-y-6">
+      <PageHeader title="Remote check-ins" subtitle="Selfie and GPS from the mobile app. A check-in counts at once; rejecting it removes it from the day."
+        filters={<PillTabs label="Status" value={status} onChange={setStatus} tabs={[...REVIEW_TABS.map((s) => ({ value: s, label: REQUEST_STATUS[s].label })), { value: 'ALL', label: 'All' }]} />} />
+      <Panel>
+        <DataTable rows={list.rows} getRowKey={(r) => r.id} loading={list.isLoading} onRowClick={(r) => setOpenId(r.id)}
+          empty={<EmptyState title={status === 'PENDING' ? 'Nothing waiting for review' : 'No check-ins here'} />}
+          columns={[
+            { key: 'p', header: '', render: (r) => r.selfieUrl
+              ? <img src={r.selfieUrl} alt={`Selfie of ${r.employee?.fullName ?? 'employee'}`} className="size-10 rounded-full object-cover" loading="lazy" />
+              : <span className="text-fg-subtle">—</span> },
+            { key: 'e', header: 'Employee', render: (r) => <span className="font-semibold text-fg">{r.employee?.fullName ?? '—'}</span> },
+            { key: 't', header: 'Time', render: (r) => <span>{r.local} <span className="text-fg-muted">· {r.direction === 'in' ? 'In' : 'Out'}</span></span> },
+            { key: 'l', header: 'Location', render: (r) => (
+              <span className="flex items-center gap-2 text-fg-muted">{where(r)}{r.isMockLocation && <Badge tone="danger">Mock location</Badge>}</span>
+            ) },
+            { key: 's', header: 'Status', render: (r) => <StatusBadge value={r.reviewStatus} map={REQUEST_STATUS} /> },
+            { key: 'a', header: '', render: (r) => <Decide path="/remote-work/punches" id={r.id} noun="Check-in" canDecide={canDecide(r)} /> },
+          ]} />
+        <ListFooter count={list.rows.length} noun="check-ins" hasMore={Boolean(list.hasNextPage)} loadingMore={list.isFetchingNextPage} onLoadMore={() => void list.fetchNextPage()} />
+      </Panel>
+      {open && (
+        <Modal open onClose={() => setOpenId(null)} size="lg" title={`${open.employee?.fullName ?? 'Employee'} · check-${open.direction}`}
+          description={`${open.local} (UTC${open.offset})`}
+          footer={<Decide path="/remote-work/punches" id={open.id} noun="Check-in" canDecide={canDecide(open)} />}>
+          <div className="grid gap-4 p-5 sm:grid-cols-2 sm:p-6">
+            {open.selfieUrl
+              ? <img src={open.selfieUrl} alt={`Selfie of ${open.employee?.fullName ?? 'employee'}`} className="aspect-[3/4] w-full rounded-lg object-cover" />
+              : <Callout tone="warning" title="No selfie">Removed after the photo retention period.</Callout>}
+            <div className="space-y-3">
+              <iframe title="Check-in location" className="aspect-square w-full rounded-lg border border-border"
+                src={`https://www.openstreetmap.org/export/embed.html?bbox=${open.lng - 0.004},${open.lat - 0.004},${open.lng + 0.004},${open.lat + 0.004}&layer=mapnik&marker=${open.lat},${open.lng}`} />
+              <DescriptionList columns={1} items={[
+                { term: 'Location', value: <a className="underline" href={`https://www.google.com/maps?q=${open.lat},${open.lng}`} target="_blank" rel="noreferrer">{where(open)}</a> },
+                { term: 'GPS', value: open.isMockLocation ? <Badge tone="danger">Mock location reported</Badge> : 'Device location' },
+                { term: 'Review', value: <span><StatusBadge value={open.reviewStatus} map={REQUEST_STATUS} />{open.reviewNote ? ` ${open.reviewNote}` : ''}</span> },
+              ]} />
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

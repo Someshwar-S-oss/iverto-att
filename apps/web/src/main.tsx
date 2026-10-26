@@ -11,7 +11,7 @@ import { Login, SetPassword, Suspended } from './pages/Auth';
 import { Corrections, Daily, Logs, Overview } from './pages/Attendance';
 import { EmployeeDetail, Employees } from './pages/Employees';
 import { Leaderboard } from './pages/Leaderboard';
-import { Leave, RemoteWork } from './pages/Leave';
+import { Leave, RemoteCheckIns, RemoteWork } from './pages/Leave';
 import { Live } from './pages/Live';
 import { TenantDetail, Tenants } from './pages/Platform';
 import { Reports } from './pages/Reports';
@@ -67,6 +67,7 @@ const router = createBrowserRouter([
           { path: 'leave/:tab', element: <Leave /> },
           { path: 'leave', element: <Navigate to="/leave/requests" replace /> },
           { path: 'remote-work', element: <RemoteWork /> },
+          { path: 'remote-work/check-ins', element: <RemoteCheckIns /> },
           { path: 'reports', element: <Reports /> },
           { path: 'terminals', element: <Terminals /> },
           { path: 'enrollment', element: <Enrollment /> },

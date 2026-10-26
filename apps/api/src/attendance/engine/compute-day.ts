@@ -284,6 +284,9 @@ export function computeAttendanceDay(input: EngineInput): EngineResult {
     open,
   };
   result.liveState = liveStateOf(input, result, pairing.inside, status);
+  // A no-show past absentAfterMinutes is absent now, not "in progress" until the window
+  // closes; a late punch recomputes the day and lifts it.
+  if (open && result.liveState === 'ABSENT') result.status = 'ABSENT';
   return result;
 }
 
@@ -299,13 +302,16 @@ function liveStateOf(input: EngineInput, r: EngineResult, inside: boolean, final
     return expectedBack ? 'ON_BREAK' : 'LEFT';
   }
   if (remote) return 'REMOTE';
-  if (leave?.portion === 0.5 && leave.half === 'FIRST') return 'ON_LEAVE';
-  const start = day.flexible ? day.coreStart ?? day.schedStart : day.schedStart;
-  if (!start || !r.open) return 'ABSENT';
+  // First half on leave: due at mid-shift, judged from there like a normal start.
+  const firstHalfOff = leave?.portion === 0.5 && leave.half === 'FIRST';
+  const start = firstHalfOff
+    ? day.schedStart && day.schedEnd && new Date((day.schedStart.getTime() + day.schedEnd.getTime()) / 2)
+    : day.flexible ? day.coreStart ?? day.schedStart : day.schedStart;
+  if (!start || !r.open) return firstHalfOff ? 'ON_LEAVE' : 'ABSENT';
   const late = now.getTime() - start.getTime();
   if (late >= policy.absentAfterMinutes * MIN) return 'ABSENT';
   if (late > policy.graceInMinutes * MIN) return 'LATE_NOT_IN';
-  return 'NOT_YET_IN';
+  return firstHalfOff ? 'ON_LEAVE' : 'NOT_YET_IN';
 }
 
 /**

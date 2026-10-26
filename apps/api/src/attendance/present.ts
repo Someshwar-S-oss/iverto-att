@@ -111,6 +111,9 @@ export function presentPunch(p: PunchWithNames, tz: string) {
     reason: p.reason,
     createdBy: p.createdBy,
     hasPhoto: Boolean(p.photoKey),
+    reviewStatus: p.reviewStatus,
+    reviewNote: p.reviewNote,
+    reviewedAt: p.reviewedAt,
     receivedAt: p.receivedAt,
   };
 }

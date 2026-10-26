@@ -271,14 +271,28 @@ try {
     return d.body.items?.[0]?.corrected ? d.body.items[0] : null;
   });
   ok(corrected && ['PRESENT', 'PENDING'].includes(corrected.status) && corrected.workedMinutes === 540, 'correction turned the day present (punch trail kept)', corrected);
-  r = await call(employee, 'POST', '/mobile/punches', { direction: 'in', lat: 13.08, lng: 80.27, accuracy: 12 });
+  // Smallest JPEG the server accepts (SOI + EOI); stored in Azurite via AZURE_STORAGE_CONNECTION_STRING.
+  const selfie = { direction: 'in', lat: 13.08, lng: 80.27, accuracy: 12, selfieBase64: '/9j/2Q==' };
+  r = await call(employee, 'POST', '/mobile/punches', selfie);
   ok(r.status === 403 && r.body.code === 'MOBILE_PUNCH_NOT_ALLOWED', 'mobile punch refused without remote approval', r.body);
   r = await call(employee, 'POST', '/mobile/remote-work', { from: today(), to: today(), reason: 'site visit' });
   const remoteId = r.body.id;
   r = await call(manager, 'POST', `/mobile/approvals/remote/${remoteId}/approve`, {});
   ok(r.body.status === 'APPROVED', 'remote approved', r.body);
-  r = await call(employee, 'POST', '/mobile/punches', { direction: 'in', lat: 13.08, lng: 80.27, accuracy: 12 });
-  ok(r.status === 201 && r.body.source === 'MOBILE', 'mobile punch accepted on an approved remote day', r.body);
+  r = await call(employee, 'POST', '/mobile/punches', { ...selfie, selfieBase64: 'aGVsbG8=' });
+  ok(r.status === 400 && r.body.code === 'FILE_TYPE_MISMATCH', 'mobile punch refused with a non-JPEG selfie', r.body);
+  r = await call(employee, 'POST', '/mobile/punches', selfie);
+  ok(r.status === 201 && r.body.source === 'MOBILE' && r.body.reviewStatus === 'PENDING', 'mobile punch accepted on an approved remote day, pending review', r.body);
+  const mobilePunchId = r.body.id;
+  r = await call(manager, 'GET', '/remote-work/punches?status=PENDING');
+  const pending = r.body.data?.find((p) => p.id === mobilePunchId);
+  ok(pending && pending.selfieUrl && pending.lat === 13.08, 'check-in listed for review with a selfie link', r.body);
+  r = await call(employee, 'POST', `/remote-work/punches/${mobilePunchId}/approve`, {});
+  ok(r.status === 403, 'employee cannot review check-ins', r.body);
+  r = await call(manager, 'POST', `/remote-work/punches/${mobilePunchId}/reject`, { note: 'Not at the client site' });
+  ok(r.status === 201 && r.body.reviewStatus === 'REJECTED' && r.body.outcome === 'DENIED', 'check-in rejected and dropped from the day', r.body);
+  r = await call(manager, 'POST', `/remote-work/punches/${mobilePunchId}/approve`, {});
+  ok(r.status === 409, 'a reviewed check-in cannot be decided twice', r.body);
 
   console.log('10. Mobile self-service');
   r = await call(employee, 'GET', '/mobile/me');

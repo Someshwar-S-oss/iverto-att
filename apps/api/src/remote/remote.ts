@@ -1,15 +1,18 @@
 import { Body, Controller, Get, Injectable, Module, Param, Post, Query } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
-import { RemoteWorkRequest } from '@prisma/client';
+import { Prisma, RemoteWorkRequest } from '@prisma/client';
 import { Type } from 'class-transformer';
-import { IsBoolean, IsIn, IsLatitude, IsLongitude, IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator';
+import { IsBase64, IsBoolean, IsIn, IsInt, IsLatitude, IsLongitude, IsNumber, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
+import { randomUUID } from 'crypto';
+import { presentPunch } from '../attendance/present';
 import { RecomputeQueue } from '../attendance/recompute.service';
 import { AuditableActionService } from '../audit/audit.service';
-import { actorOf, AuthUser, CurrentUser } from '../auth/auth.types';
+import { actorOf, AuthUser, CurrentUser, Roles } from '../auth/auth.types';
 import { ScopeService } from '../auth/scope.service';
+import { AzureBlobService } from '../common/azure-blob.service';
 import { AppError } from '../common/errors';
 import { PrismaService } from '../common/prisma.service';
-import { dbDate, diffDays, localYmd, ymdOf } from '../common/time';
+import { dbDate, diffDays, formatLocal, localYmd, ymdOf } from '../common/time';
 import { IsYmd } from '../common/validators';
 import { NoteDto, RequiredNoteDto } from '../leave/leave';
 import { NotificationsService } from '../notifications/notifications';
@@ -30,7 +33,20 @@ export class MobilePunchDto {
   @IsOptional() @IsBoolean() isMockLocation?: boolean;
   /** The device's clock, for audit only — the server time is authoritative (§9). */
   @IsOptional() @IsString() @MaxLength(40) clientTime?: string;
+  /** Base64 JPEG taken in-app at the moment of the punch; stored in Azure Blob for review. */
+  @IsBase64() selfieBase64: string;
 }
+
+export class PunchReviewQuery {
+  @IsOptional() @IsIn(['PENDING', 'APPROVED', 'REJECTED']) status?: string;
+  @IsOptional() @IsString() employeeId?: string;
+  @IsOptional() @IsYmd() from?: string;
+  @IsOptional() @IsYmd() to?: string;
+  @IsOptional() @IsString() cursor?: string;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(200) limit?: number;
+}
+
+const MAX_SELFIE_BYTES = 2 * 1024 * 1024;
 
 /** Remote work (§9): same approval path as leave, same no-overlap constraint, plus field/remote punches. */
 @Injectable()
@@ -42,6 +58,7 @@ export class RemoteService {
     private readonly recompute: RecomputeQueue,
     private readonly notifications: NotificationsService,
     private readonly punches: PunchesService,
+    private readonly blobs: AzureBlobService,
   ) {}
 
   present(r: RemoteWorkRequest & Record<string, any>) {
@@ -129,7 +146,8 @@ export class RemoteService {
   /**
    * Remote/field check-in (§9). Server time is authoritative; allowed when the
    * employee's mobile_punch is ALWAYS, or REMOTE_DAYS with approved remote work
-   * today. Coordinates are stored for audit; no geofencing in v1.
+   * today. Coordinates and a selfie are stored; the punch counts at once and
+   * waits in PENDING review — a rejection takes it out of the day.
    */
   async mobilePunch(user: AuthUser, dto: MobilePunchDto) {
     const employee = await this.scope.self(user);
@@ -146,6 +164,12 @@ export class RemoteService {
     if (!allowed) {
       throw new AppError(403, 'MOBILE_PUNCH_NOT_ALLOWED', employee.mobilePunch === 'NEVER' ? 'Mobile punching is not enabled for you' : 'You have no approved remote work today');
     }
+    const selfie = Buffer.from(dto.selfieBase64, 'base64');
+    if (selfie.byteLength > MAX_SELFIE_BYTES) throw new AppError(413, 'FILE_TOO_LARGE', 'The selfie must be at most 2 MB');
+    if (selfie[0] !== 0xff || selfie[1] !== 0xd8) throw new AppError(400, 'FILE_TYPE_MISMATCH', 'The selfie must be a JPEG');
+    // Upload first so a punch never exists without its selfie; a failed insert only leaves an orphan blob.
+    const photoKey = `${employee.tenantId}/${employee.id}/${today}/${randomUUID()}.jpg`;
+    await this.blobs.upload(photoKey, selfie, 'image/jpeg');
     const punch = await this.punches.record(
       {
         tenantId: employee.tenantId,
@@ -160,10 +184,75 @@ export class RemoteService {
         isMockLocation: dto.isMockLocation ?? null,
         reason: dto.clientTime ? `clientTime=${dto.clientTime}` : null,
         createdBy: user.sub,
+        photoKey,
+        reviewStatus: 'PENDING',
       },
       employee,
     );
     return punch;
+  }
+
+  /** Mobile check-ins for review, newest first, each with a 1-hour selfie link. */
+  async listPunches(user: AuthUser, q: PunchReviewQuery) {
+    const limit = q.limit ?? 50;
+    const where: Prisma.PunchWhereInput = {
+      tenantId: user.tenantId,
+      source: 'MOBILE',
+      reviewStatus: q.status ?? { not: null },
+      employee: { AND: [await this.scope.employeeWhere(user), q.employeeId ? { id: q.employeeId } : {}] },
+      ...(q.from || q.to ? { workDate: { gte: q.from ? dbDate(q.from) : undefined, lte: q.to ? dbDate(q.to) : undefined } } : {}),
+    };
+    const cursor = q.cursor ? JSON.parse(Buffer.from(q.cursor, 'base64url').toString()) : null;
+    const rows = await this.prisma.punch.findMany({
+      where: cursor
+        ? { AND: [where, { OR: [{ punchedAt: { lt: new Date(cursor.t) } }, { punchedAt: new Date(cursor.t), id: { lt: cursor.id } }] }] }
+        : where,
+      include: { employee: { include: { site: true } }, device: true },
+      orderBy: [{ punchedAt: 'desc' }, { id: 'desc' }],
+      take: limit + 1,
+    });
+    const page = rows.slice(0, limit);
+    const last = page[page.length - 1];
+    return {
+      data: page.map((p) => ({ ...presentPunch(p, p.employee!.site.timezone), selfieUrl: p.photoKey ? this.blobs.readUrl(p.photoKey) : null })),
+      nextCursor:
+        rows.length > limit && last ? Buffer.from(JSON.stringify({ t: last.punchedAt.toISOString(), id: last.id })).toString('base64url') : null,
+    };
+  }
+
+  async reviewPunch(user: AuthUser, id: string, verdict: 'APPROVED' | 'REJECTED', note?: string) {
+    const p = await this.prisma.punch.findFirst({
+      where: { id, tenantId: user.tenantId, source: 'MOBILE' },
+      include: { employee: { include: { site: true } } },
+    });
+    if (!p?.employee) throw new AppError(404, 'NOT_FOUND', 'Mobile check-in not found');
+    await this.scope.assertApprover(user, p.employee.id);
+    if (p.reviewStatus !== 'PENDING') throw new AppError(409, 'ALREADY_DECIDED', `This check-in is already ${(p.reviewStatus ?? 'reviewed').toLowerCase()}`);
+    const updated = await this.audit.run({
+      action: `MOBILE_PUNCH_${verdict}`,
+      targetType: 'Punch',
+      targetId: id,
+      actor: actorOf(user),
+      tenantId: user.tenantId,
+      payloadFrom: () => ({ note: note ?? null }),
+      run: (tx) =>
+        tx.punch.update({
+          where: { id_punchedAt: { id, punchedAt: p.punchedAt } },
+          // DENIED takes it out of the day: the engine only reads GRANTED punches.
+          data: { reviewStatus: verdict, reviewedBy: user.sub, reviewedAt: new Date(), reviewNote: note ?? null, ...(verdict === 'REJECTED' ? { outcome: 'DENIED' } : {}) },
+        }),
+    });
+    const tz = p.employee.site.timezone;
+    if (verdict === 'REJECTED') {
+      if (p.workDate) await this.recompute.day(p.employee.id, ymdOf(p.workDate), 500);
+      await this.notifications.notify(p.tenantId, [p.employee.userId], {
+        type: 'MOBILE_PUNCH_REJECTED',
+        title: 'Check-in rejected',
+        body: `Your mobile check-${p.direction} at ${formatLocal(p.punchedAt, tz, 'yyyy-MM-dd HH:mm')} was rejected${note ? `: ${note}` : ''}`,
+        data: { id },
+      });
+    }
+    return presentPunch({ ...updated, employee: p.employee, device: null }, tz);
   }
 }
 
@@ -198,9 +287,33 @@ export class RemoteController {
   }
 }
 
+@ApiTags('remote-work')
+@Controller('remote-work/punches')
+export class RemotePunchesController {
+  constructor(private readonly remote: RemoteService) {}
+
+  @Get()
+  @Roles('ADMIN', 'HR', 'MANAGER')
+  list(@CurrentUser() user: AuthUser, @Query() q: PunchReviewQuery) {
+    return this.remote.listPunches(user, q);
+  }
+
+  @Post(':id/approve')
+  @Roles('ADMIN', 'HR', 'MANAGER')
+  approve(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() dto: NoteDto) {
+    return this.remote.reviewPunch(user, id, 'APPROVED', dto.note);
+  }
+
+  @Post(':id/reject')
+  @Roles('ADMIN', 'HR', 'MANAGER')
+  reject(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() dto: RequiredNoteDto) {
+    return this.remote.reviewPunch(user, id, 'REJECTED', dto.note);
+  }
+}
+
 @Module({
   imports: [PunchesModule],
-  controllers: [RemoteController],
+  controllers: [RemoteController, RemotePunchesController],
   providers: [RemoteService],
   exports: [RemoteService],
 })

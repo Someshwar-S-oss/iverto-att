@@ -64,6 +64,12 @@ export function policySnapshot(p: AttendancePolicy | null): EnginePolicy & Recor
   };
 }
 
+/** Flat-object equality; jsonb hands keys back in its own order, so plain stringify never matches. */
+const sameJson = (a: unknown, b: unknown) => {
+  const sorted = (o: any) => JSON.stringify(o, o && typeof o === 'object' ? Object.keys(o).sort() : undefined);
+  return sorted(a) === sorted(b);
+};
+
 /** The frozen schedule on an attendance_days row, in engine terms. */
 export function engineDayOf(row: AttendanceDay): EngineDay {
   return {
@@ -243,7 +249,7 @@ export class RosterService {
           row.windowStart.getTime() === (plan.windowStart as Date).getTime() &&
           row.windowEnd.getTime() === (plan.windowEnd as Date).getTime() &&
           (row.schedStart?.getTime() ?? null) === ((plan.schedStart as Date | null)?.getTime() ?? null) &&
-          JSON.stringify(row.policy) === JSON.stringify(plan.policy);
+          sameJson(row.policy, plan.policy);
         if (same && !opts.includeFinalized) continue;
         const { tenantId: _t, employeeId: _e, workDate: _w, ...schedule } = plan;
         await this.prisma.attendanceDay.update({ where: { id: row.id }, data: schedule });

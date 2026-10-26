@@ -4,6 +4,7 @@ import { Job, Queue } from 'bullmq';
 import { presentDay } from '../attendance/present';
 import { RecomputeQueue } from '../attendance/recompute.service';
 import { RosterService } from '../attendance/roster.service';
+import { AzureBlobService } from '../common/azure-blob.service';
 import { PrismaService } from '../common/prisma.service';
 import { runAsSystem } from '../common/rls';
 import { BUCKETS, SupabaseService } from '../common/supabase.service';
@@ -46,32 +47,41 @@ export class JobsService {
     private readonly employees: EmployeesService,
     private readonly reports: ReportsService,
     private readonly supabase: SupabaseService,
+    private readonly blobs: AzureBlobService,
     private readonly notifications: NotificationsService,
   ) {}
 
   /**
    * Absence without an event (§10): open days with no punch move
-   * NOT_YET_IN → LATE_NOT_IN → ABSENT as time passes. One indexed UPDATE per tick.
+   * NOT_YET_IN → LATE_NOT_IN → ABSENT as time passes (status follows to ABSENT, as
+   * in the engine). One indexed UPDATE per tick.
    */
   async sweep() {
     const changed = await this.prisma.$transaction((tx) =>
       tx.$queryRaw<Array<{ id: string }>>`
-        WITH next AS (
-          SELECT id,
-                 CASE WHEN now() >= COALESCE(core_start, sched_start) + make_interval(mins => COALESCE((policy->>'absentAfterMinutes')::int, 120))
-                      THEN 'ABSENT' ELSE 'LATE_NOT_IN' END AS state
+        WITH due AS (
+          -- Same "due" instant as the engine: mid-shift when the first half is on leave.
+          SELECT id, policy,
+                 CASE WHEN leave_half = 'FIRST' THEN sched_start + (sched_end - sched_start) / 2
+                      ELSE COALESCE(core_start, sched_start) END AS due_at
           FROM attendance_days
           WHERE finalized_at IS NULL
             AND day_type = 'WORKING'
             AND punch_count = 0
             AND remote = false
-            AND leave_portion = 0
+            AND leave_portion < 1
             AND sched_start IS NOT NULL
-            AND live_state IN ('NOT_YET_IN', 'LATE_NOT_IN')
+            AND sched_end IS NOT NULL
+            AND live_state IN ('NOT_YET_IN', 'LATE_NOT_IN', 'ON_LEAVE')
             AND now() < window_end
-            AND now() > COALESCE(core_start, sched_start) + make_interval(mins => COALESCE((policy->>'graceInMinutes')::int, 10))
+        ), next AS (
+          SELECT id,
+                 CASE WHEN now() >= due_at + make_interval(mins => COALESCE((policy->>'absentAfterMinutes')::int, 120))
+                      THEN 'ABSENT' ELSE 'LATE_NOT_IN' END AS state
+          FROM due
+          WHERE now() > due_at + make_interval(mins => COALESCE((policy->>'graceInMinutes')::int, 10))
         )
-        UPDATE attendance_days a SET live_state = next.state
+        UPDATE attendance_days a SET live_state = next.state, status = CASE WHEN next.state = 'ABSENT' THEN 'ABSENT' ELSE a.status END
         FROM next WHERE a.id = next.id AND a.live_state <> next.state
         RETURNING a.id`,
     );
@@ -140,11 +150,13 @@ export class JobsService {
       for (;;) {
         const old = await this.prisma.punch.findMany({
           where: { tenantId: t.id, photoKey: { not: null }, punchedAt: { lt: new Date(Date.now() - days * 86_400_000) } },
-          select: { id: true, punchedAt: true, photoKey: true },
+          select: { id: true, punchedAt: true, photoKey: true, source: true },
           take: 500,
         });
         if (!old.length) break;
-        await this.supabase.remove(BUCKETS.punchPhotos(), old.map((p) => p.photoKey!));
+        // Terminal photos live in Supabase, mobile selfies in Azure Blob.
+        await this.supabase.remove(BUCKETS.punchPhotos(), old.filter((p) => p.source !== 'MOBILE').map((p) => p.photoKey!));
+        await this.blobs.remove(old.filter((p) => p.source === 'MOBILE').map((p) => p.photoKey!));
         for (const p of old) {
           await this.prisma.punch.update({ where: { id_punchedAt: { id: p.id, punchedAt: p.punchedAt } }, data: { photoKey: null } });
         }

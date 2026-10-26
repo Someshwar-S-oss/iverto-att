@@ -348,10 +348,12 @@ export class MobileController {
     return this.notifications.registerDevice(user.tenantId, user.sub, dto.platform, dto.token);
   }
 
+  // Allowed during a forced password change: that screen has its own Sign-out.
   @Delete('push-devices/:token')
+  @AllowPendingPassword()
   async unregister(@CurrentUser() user: AuthUser, @Param('token') token: string) {
     await this.notifications.unregisterDevice(user.sub, token);
-    return { ok: true };
+    return { status: 'unregistered' };
   }
 
   @Get('notifications')

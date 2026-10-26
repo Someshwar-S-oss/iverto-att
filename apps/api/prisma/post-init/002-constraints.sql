@@ -16,6 +16,7 @@ SELECT pg_temp.add_check('devices', 'devices_direction_chk', $$direction IN ('IN
 SELECT pg_temp.add_check('punches', 'punches_source_chk', $$source IN ('TERMINAL','MOBILE','CORRECTION','MANUAL')$$);
 SELECT pg_temp.add_check('punches', 'punches_direction_chk', $$direction IN ('in','out','unknown')$$);
 SELECT pg_temp.add_check('punches', 'punches_manual_reason_chk', $$source <> 'MANUAL' OR reason IS NOT NULL$$);
+SELECT pg_temp.add_check('punches', 'punches_review_status_chk', $$review_status IS NULL OR review_status IN ('PENDING','APPROVED','REJECTED')$$);
 SELECT pg_temp.add_check('attendance_days', 'attendance_days_day_type_chk', $$day_type IN ('WORKING','WEEKLY_OFF','HOLIDAY')$$);
 SELECT pg_temp.add_check('attendance_days', 'attendance_days_status_chk',
   $$status IN ('PENDING','PRESENT','HALF_DAY','ABSENT','ON_LEAVE','HALF_LEAVE','REMOTE','HOLIDAY','WEEKLY_OFF')$$);

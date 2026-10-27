@@ -395,7 +395,7 @@ Detailed inspection for an individual day (formatted `YYYY-MM-DD`). Includes pai
 ```http
 POST /v1/mobile/punches
 ```
-Records an in-app remote/field check-in: a geo-tagged selfie plus the GPS fix.
+Records an in-app remote/field check-in: a geo-tagged selfie plus the GPS fix. Step-by-step guide with Android code: [`remote_checkin_mobile_api.md`](./remote_checkin_mobile_api.md).
 - **Authorization**: Allowed if employee policy is `ALWAYS`, or `REMOTE_DAYS` with approved remote work today.
 - **Selfie (required)**: `selfieBase64` is a base64 JPEG taken with the front camera at the moment of the punch, at most **2 MB** decoded (resize to ~720 px wide, quality 80 is plenty). Non-JPEG → `400 FILE_TYPE_MISMATCH`; too large → `413 FILE_TOO_LARGE`. The server stores it in a private Azure Blob container; the app never talks to Azure directly.
 - **Review**: Every mobile punch is created with `reviewStatus: "PENDING"` and counts towards the day immediately. A manager/HR/admin then approves or rejects it; a rejected punch (`reviewStatus: "REJECTED"`, `outcome: "DENIED"`) drops out of the day's attendance and the employee receives a `MOBILE_PUNCH_REJECTED` notification. `GET /v1/mobile/today` and `/v1/mobile/attendance/:date` return `reviewStatus` / `reviewNote` on each punch so the app can show the state.

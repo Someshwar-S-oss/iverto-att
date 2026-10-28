@@ -80,8 +80,8 @@ function OrgForm({ org }: { org: Org }) {
           { key: 'punchPhotoRetentionDays', label: 'Punch photo retention (days)', type: 'number', when: (x) => x.storePunchPhotos },
           { key: 'reportRetentionDays', label: 'Report file retention (days)', type: 'number' },
           { key: 'leaveCountsAgainstAttendance', label: 'Approved leave lowers attendance score', type: 'bool', hint: 'Leaderboard. Off: approved leave days are left out; unapproved absences always count.' },
-          { key: 'displayName', label: 'Name on reports', hint: 'Shown in the PDF header' },
-          { key: 'logoUrl', label: 'Logo URL (https)', hint: 'Without one, reports use the Iverto lockup' },
+          { key: 'displayName', label: 'Display name', hint: 'Shown beside the logo in the web and mobile apps, and in report headers' },
+          { key: 'logoUrl', label: 'Logo URL (https)', hint: 'Replaces the Iverto logo in the web app, mobile app and reports. Square images look best.' },
           { key: 'primaryColor', label: 'Report accent colour', type: 'color' },
         ]} />
         <Button type="submit" loading={save.isPending}>Save settings</Button>

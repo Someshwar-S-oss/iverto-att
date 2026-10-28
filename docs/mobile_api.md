@@ -101,6 +101,17 @@ GET /v1/mobile/me
 }
 ```
 
+#### Organisation branding
+Show the org's own logo and name in the app header and drawer instead of the Iverto logo, with a small "Powered by iverto.ai" line at the bottom of the drawer or settings screen. Admins set both under **Settings → Organisation** on the web; reports use the same values.
+
+| Field | Meaning |
+|---|---|
+| `organisation.name` | The display name, or the organisation name if no display name is set. Never null. |
+| `organisation.logoUrl` | An https image URL, or `null`. When it's `null`, or the image fails to load, show the bundled Iverto logo. The URL is public, so load it without the `Authorization` header and cache it by URL. |
+| `organisation.primaryColor` | An optional `#RRGGBB` accent colour, or `null`. |
+
+Re-read `/me` on app start and on resume, so a logo change shows up without needing to sign in again.
+
 ---
 
 ### 2.2 Change Password

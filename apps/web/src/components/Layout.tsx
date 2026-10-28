@@ -1,11 +1,12 @@
-import { AppShell, Kbd, type NavGroup } from '@iverto-org/core-ui';
+import { AppShell, Kbd, Logo, type NavGroup } from '@iverto-org/core-ui';
+import { useState } from 'react';
 import {
   Activity, BarChart3, CalendarDays, CalendarRange, ClipboardCheck, Clock, Cpu, Home, LogOut, MapPin, Plane, ScanFace, Search,
   Settings, Sun, TableProperties, Trophy, Users, Building2, ArrowLeftRight, Repeat,
 } from 'lucide-react';
 import { Outlet, useLocation, useNavigate } from 'react-router';
 import { isHr, isManager, useAuth, useMe } from '../lib/auth';
-import { clearCache } from '../lib/api';
+import { clearCache, useApi } from '../lib/api';
 import { ROLE_LABEL } from '../lib/format';
 import { useLiveSocket } from '../lib/live';
 import { CommandPalette, SHORTCUT, useCommandPalette } from './CommandPalette';
@@ -14,6 +15,23 @@ const icon = (I: typeof Home) => <I size={19} />;
 /** Fake href for the Search nav row; never a real route. */
 const SEARCH = '#search';
 
+interface Branding { name: string; settings: { branding?: { displayName?: string; logoUrl?: string } | null } }
+
+/** The org's own logo and name (Settings → Organisation); the Iverto lockup until one is set or if it fails to load. */
+function OrgLogo({ collapsed }: { collapsed: boolean }) {
+  const org = useApi<Branding>('/org').data;
+  const [broken, setBroken] = useState<string>();
+  const logoUrl = org?.settings.branding?.logoUrl;
+  if (!logoUrl || broken === logoUrl) return collapsed ? <Logo variant="mark" height={32} /> : <Logo height={40} />;
+  const name = org.settings.branding?.displayName || org.name;
+  return (
+    <div className="flex min-w-0 items-center gap-2.5">
+      <img src={logoUrl} alt={name} className="h-9 w-9 shrink-0 rounded-lg object-contain" onError={() => setBroken(logoUrl)} />
+      <span className={`min-w-0 truncate font-bold text-fg ${collapsed ? 'md:hidden' : ''}`}>{name}</span>
+    </div>
+  );
+}
+
 export function Layout() {
   const me = useMe();
   const { signOut, override, setOverride } = useAuth();
@@ -21,6 +39,7 @@ export function Layout() {
   const { pathname } = useLocation();
   useLiveSocket(true);
   const [searching, setSearching] = useCommandPalette();
+  const [collapsed, setCollapsed] = useState(false);
 
   const mgr = isManager(me);
   const hr = isHr(me);
@@ -93,6 +112,9 @@ export function Layout() {
         else navigate(item.href);
       }}
       user={{ name: me.name, role: ROLE_LABEL[me.role] }}
+      logo={<OrgLogo collapsed={collapsed} />}
+      collapsed={collapsed}
+      onCollapsedChange={setCollapsed}
       banner={
         override ? (
           <div className="flex items-center justify-center gap-3 bg-warning-soft px-4 py-2 text-sm text-warning-fg">
@@ -108,6 +130,9 @@ export function Layout() {
       ]}
     >
       <Outlet />
+      <p className="py-6 text-center text-xs text-fg-subtle">
+        Powered by <a href="https://iverto.ai" target="_blank" rel="noreferrer" className="font-semibold text-fg-muted hover:text-brand">iverto.ai</a>
+      </p>
       <CommandPalette open={searching} onClose={() => setSearching(false)} navGroups={groups} />
     </AppShell>
   );

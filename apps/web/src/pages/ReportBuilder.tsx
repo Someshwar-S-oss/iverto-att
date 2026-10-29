@@ -1,7 +1,7 @@
 import {
-  Badge, Button, Callout, Card, confirmAction, DataTable, DateInput, EmptyState, IconButton, Modal, Select, Switch, TextField, Textarea,
+  Accordion, Badge, Button, Callout, Card, confirmAction, DataTable, DateInput, EmptyState, IconButton, Modal, Select, Switch, TextField, Textarea,
 } from '@iverto-org/core-ui';
-import { ArrowDown, ArrowUp, Eye, FilePlus2, Pencil, Plus, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, BookOpen, Eye, FilePlus2, Pencil, Plus, Trash2, X } from 'lucide-react';
 import { useState } from 'react';
 import { Panel } from '../components/ui';
 import { del, patch, post, useAction, useApi } from '../lib/api';
@@ -64,6 +64,7 @@ const STARTERS: { name: string; spec: Spec }[] = [
 export function CustomReports() {
   const { data, isLoading } = useApi<Template[]>('/reports/templates');
   const [editing, setEditing] = useState<{ id?: string; name: string; description: string; spec: Spec } | null>(null);
+  const [guide, setGuide] = useState(false);
   const remove = useAction((id: string) => del(`/reports/templates/${id}`), { invalidate: ['/reports/templates', '/reports/types'], success: 'Report deleted' });
   return (
     <div className="space-y-4">
@@ -77,6 +78,7 @@ export function CustomReports() {
             {i ? s.name : 'New report'}
           </Button>
         ))}
+        <Button variant="ghost" className="sm:ml-auto" leftIcon={<BookOpen size={16} />} onClick={() => setGuide(true)}>How to build reports</Button>
       </div>
       <Panel>
         <DataTable rows={data ?? []} getRowKey={(t) => t.id} loading={isLoading} onRowClick={(t) => setEditing({ id: t.id, name: t.name, description: t.description ?? '', spec: { ...t.spec, where: t.spec.where ?? [] } })}
@@ -92,6 +94,7 @@ export function CustomReports() {
           </>} />
       </Panel>
       {editing && <Builder initial={editing} onClose={() => setEditing(null)} />}
+      <Guide open={guide} onClose={() => setGuide(false)} />
     </div>
   );
 }
@@ -255,5 +258,238 @@ function PreviewTable({ p }: { p: Preview }) {
       ))}
       <p className="text-xs text-fg-muted">{p.from} – {p.to} · showing up to 50 rows per section of {p.total}. Exports include everything.</p>
     </div>
+  );
+}
+
+// ── Guide ───────────────────────────────────────────────────────────────────
+
+/** What each field means. Keyed `source.key` where the same key means different things per source. */
+const FIELD_HELP: Record<string, string> = {
+  employeeCode: 'The employee ID/code from the Employees page.',
+  employeeName: 'The employee’s full name.',
+  department: 'Department name; “No department” when none is set.',
+  site: 'The location the employee belongs to.',
+  designation: 'Job title.',
+  employmentType: 'Full time, part time, contract or intern.',
+  manager: 'Name of the employee’s reporting manager.',
+  'days.date': 'The work date. A night shift belongs to the date it started.',
+  'days.month': 'The work date’s month as YYYY-MM. Use it as a column to get one row per month.',
+  weekday: 'Day of the week (Sun–Sat). Group by it to spot, say, Monday absences.',
+  'days.status': 'The day’s verdict: Present, Absent, Half day, On leave, Half leave, Remote, Holiday, Weekly off — or Pending while the day is still in progress.',
+  statusCode: 'The short muster code: P, A, HD, L, ½L, R, H, WO (· while pending).',
+  dayType: 'What the roster said the day was: Working, Weekly off or Holiday. Filter on Working to ignore off days.',
+  holiday: 'The holiday’s name; empty on other days.',
+  shiftStart: 'Scheduled start time (site local time).',
+  shiftEnd: 'Scheduled end time (site local time).',
+  firstIn: 'Time of the first in-punch.',
+  lastOut: 'Time of the last out-punch.',
+  workedMinutes: 'Time actually worked, after breaks.',
+  requiredMinutes: 'Time the shift requires.',
+  breakMinutes: 'Break time: the shift’s break, or the gaps between an out and the next in.',
+  lateMinutes: 'How late the first in-punch was, beyond the grace period. 0 when on time.',
+  earlyExitMinutes: 'How early the last out-punch was before shift end, beyond the grace period.',
+  overtimeMinutes: 'Time credited as overtime under your overtime rules.',
+  punchCount: 'Number of punches counted for the day.',
+  leavePortion: 'How much of the day approved leave covers: 0, 0.5 or 1.',
+  isLate: 'Yes when the person arrived after shift start plus grace.',
+  isEarlyExit: 'Yes when the person left before shift end minus grace.',
+  missedPunch: 'Yes when an in has no matching out (or the other way round).',
+  'days.remote': 'Yes on an approved remote-work day.',
+  corrected: 'Yes when an approved correction changed the day.',
+  workedOnOffDay: 'Yes when the person worked on a holiday or weekly off.',
+  'punches.date': 'The work date the punch counts towards.',
+  time: 'Local time of the punch (HH:mm:ss).',
+  hour: 'The hour of the punch, e.g. 09:00. Group by it to see rush hours.',
+  direction: 'In, Out, or Unknown (the device didn’t say).',
+  source: 'Terminal (biometric device), Mobile (app), Correction (approved request) or Manual (added by HR).',
+  outcome: 'Granted, Denied (rejected by the device or a reviewer) or Unknown.',
+  device: 'Device name, or its serial number when unnamed.',
+  gate: 'The gate the device is installed at.',
+  mockLocation: 'Yes when the phone reported a faked GPS location.',
+  'punches.reason': 'The note on a manual or correction punch.',
+  leaveType: 'The leave type’s name, e.g. Casual leave.',
+  paid: 'Yes for paid leave types.',
+  startDate: 'First day of the leave.',
+  endDate: 'Last day of the leave.',
+  'leave.month': 'Month the leave starts, as YYYY-MM.',
+  'leave.days': 'Leave days charged; a half day counts 0.5.',
+  'leave.status': 'Pending, Approved, Rejected or Cancelled.',
+  'leave.reason': 'The reason the employee gave.',
+  requestedOn: 'Date the request was submitted.',
+  email: 'Work email.',
+  phone: 'Phone number.',
+  joinedOn: 'Joining date.',
+  joinedMonth: 'Joining month as YYYY-MM — count by it for joiners per month.',
+  exitOn: 'Exit date; empty for current staff.',
+  'employees.status': 'Active or Exited.',
+  mobilePunch: 'Whether they may punch from the app: Never, Remote days or Always.',
+  biometricConsent: 'Yes once the employee has given biometric consent.',
+};
+
+const TYPE_HELP: Record<FieldType, string> = {
+  text: 'Words. Compare with is / is not / contains / is empty.',
+  enum: 'A fixed list of values. Pick any of them in a condition.',
+  bool: 'Yes or no.',
+  number: 'A plain number. Can be totalled and averaged.',
+  minutes: 'A duration. Shown as h:mm, but type minutes in conditions (90 = 1h 30m).',
+  date: 'A date (YYYY-MM-DD). Compare with on / before / after.',
+};
+
+const FORMULAS: { agg: string; formula: string; use: string }[] = [
+  { agg: 'count', formula: 'number of rows in the group (that match its condition)', use: 'late days, absences, headcount, punches' },
+  { agg: 'percent', formula: 'rows matching the condition ÷ all rows in the group × 100', use: 'attendance %, punctuality %, share on leave' },
+  { agg: 'sum', formula: 'value₁ + value₂ + … (numbers and durations only)', use: 'total overtime, total leave days' },
+  { agg: 'avg', formula: 'total ÷ number of non-empty values (numbers and durations only)', use: 'average worked time, average lateness' },
+  { agg: 'min', formula: 'smallest value — earliest for dates and times', use: 'first joining date, earliest in-time' },
+  { agg: 'max', formula: 'largest value — latest for dates and times', use: 'latest punch, longest overtime' },
+  { agg: 'distinct', formula: 'how many different values appear', use: 'people who were late, departments affected' },
+];
+
+const RECIPES: { name: string; source: string; steps: string[] }[] = [
+  {
+    name: 'Attendance % per employee', source: 'Attendance days',
+    steps: ['Columns: Employee, Department', 'Calculation “% of rows” where Status is any of Present, Remote → heading “Attendance %”', 'Filter: Day type is any of Working (so off days don’t count)', 'Sort by Attendance %, Low → high'],
+  },
+  {
+    name: 'Punctuality % by department', source: 'Attendance days',
+    steps: ['Column: Department', 'Calculation “% of rows” where Late is no → “On time %”', 'Filter: Status is any of Present, Remote (only days people came in)'],
+  },
+  {
+    name: 'Chronic latecomers', source: 'Attendance days',
+    steps: ['Column: Employee', 'Calculation “Count of rows” where Late is yes → “Late days”', 'Calculation “Average of” Late by → “Average late by”', 'Sort by Late days, High → low; turn on Bar chart'],
+  },
+  {
+    name: 'Overtime per month', source: 'Attendance days',
+    steps: ['Columns: Month, Employee', 'Calculation “Total of” Overtime', 'Filter: Overtime more than (min) 0', 'Split into sections by Month for one table per month'],
+  },
+  {
+    name: 'Late by more than 15 minutes', source: 'Attendance days',
+    steps: ['Columns: Date, Employee, Shift start, First in, Late by', 'Filter: Late by more than (min) 15'],
+  },
+  {
+    name: 'Leave taken by type', source: 'Leave requests',
+    steps: ['Columns: Employee, Leave type', 'Calculation “Total of” Days → “Days taken”', 'Filter: Status is any of Approved'],
+  },
+  {
+    name: 'Missed punches per site', source: 'Attendance days',
+    steps: ['Column: Site', 'Calculation “Count of rows” where Missed punch is yes', 'Calculation “Number of different” Employee → “People”'],
+  },
+  {
+    name: 'Joiners per month', source: 'Employees',
+    steps: ['Column: Joined (month)', 'Calculation “Count of rows” → “Joiners”', 'Pick dates covering the months you want when exporting'],
+  },
+];
+
+function Guide({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const sources = useApi<SourceDef[]>('/reports/fields', undefined, { staleTime: Infinity, enabled: open }).data ?? [];
+  const term = 'font-semibold text-fg';
+  return (
+    <Modal open={open} onClose={onClose} size="drawer" title="Custom report guide" description="How reports are built, every field you can use, and the formula behind each calculation.">
+      <div className="p-5 text-sm text-fg-muted sm:p-6">
+        <Accordion defaultOpen={['basics']} sections={[
+          {
+            id: 'basics', title: 'How a report works',
+            content: (
+              <ol className="list-decimal space-y-2 pl-5">
+                <li><span className={term}>Data source</span> — what one row is: an employee’s day, a punch, a leave request or an employee.</li>
+                <li><span className={term}>Columns</span> — add <i>fields</i> to show values as they are, and <i>calculations</i> to count, total or average them.</li>
+                <li><span className={term}>List or summary</span> — with only fields you get a list, one line per row. Add any calculation and it becomes a summary: rows with the same field values merge into one line and each calculation runs over that group. Department + Count of rows = one line per department.</li>
+                <li><span className={term}>Filter</span> — “only include rows where…” drops rows before anything is calculated. With several conditions, all must be true.</li>
+                <li><span className={term}>Calculation conditions</span> — each calculation has its own conditions, so one report can show Present, Absent and Late counts side by side.</li>
+                <li><span className={term}>Sections, sort, chart</span> — split into one table per value (each with its own totals), choose the sort column, and draw a bar chart of the first calculation (top 15).</li>
+                <li><span className={term}>Dates and people</span> are chosen when you export or schedule, not in the template. Exports only include employees the person running them can see.</li>
+                <li><span className={term}>Preview</span> shows up to 50 rows per section; the CSV/PDF export contains everything.</li>
+              </ol>
+            ),
+          },
+          {
+            id: 'fields', title: 'Fields (variables) by data source', meta: sources.length ? `${sources.length} sources` : undefined,
+            content: (
+              <div className="space-y-6">
+                <p>The <span className="font-mono text-xs">code</span> under each field is its variable name — automatic headings use it, e.g. “Count (isLate)”.</p>
+                {sources.map((src) => (
+                  <section key={src.key} className="space-y-2">
+                    <h4 className="font-bold text-fg">{src.label} <span className="font-normal text-fg-subtle">· one row = {src.row} · up to {src.maxDays} days per run</span></h4>
+                    <p>{src.description}</p>
+                    <dl className="divide-y divide-line-soft rounded-lg border border-line-soft">
+                      {src.fields.map((f) => (
+                        <div key={f.key} className="grid gap-1 px-3 py-2 sm:grid-cols-[11rem_1fr]">
+                          <dt>
+                            <div className={term}>{f.label}</div>
+                            <div className="font-mono text-xs text-fg-subtle">{f.key} · {f.type}</div>
+                          </dt>
+                          <dd>
+                            {FIELD_HELP[`${src.key}.${f.key}`] ?? FIELD_HELP[f.key] ?? TYPE_HELP[f.type]}
+                            {f.options && <div className="mt-1 text-xs text-fg-subtle">Values: {f.options.map((o) => o.label).join(', ')}</div>}
+                          </dd>
+                        </div>
+                      ))}
+                    </dl>
+                  </section>
+                ))}
+              </div>
+            ),
+          },
+          {
+            id: 'types', title: 'Field types and conditions',
+            content: (
+              <dl className="space-y-3">
+                {(Object.keys(TYPE_HELP) as FieldType[]).map((t) => (
+                  <div key={t}>
+                    <dt className={term}>{t === 'enum' ? 'list' : t === 'bool' ? 'yes/no' : t}</dt>
+                    <dd>{TYPE_HELP[t]} <span className="text-fg-subtle">Conditions: {OPS[t].map((o) => o.label).join(' · ')}</span></dd>
+                  </div>
+                ))}
+              </dl>
+            ),
+          },
+          {
+            id: 'formulas', title: 'Calculations and formulas',
+            content: (
+              <div className="space-y-3">
+                <dl className="space-y-3">
+                  {FORMULAS.map((x) => (
+                    <div key={x.agg}>
+                      <dt className={term}>{AGGS.find((a) => a.value === x.agg)!.label} <span className="font-mono text-xs font-normal text-fg-subtle">{x.agg}</span></dt>
+                      <dd>= {x.formula}. <span className="text-fg-subtle">Good for {x.use}.</span></dd>
+                    </div>
+                  ))}
+                </dl>
+                <Callout tone="info" title="Building ratios">
+                  “% of rows” is the ratio tool: the filter sets the denominator (which rows count at all) and the calculation’s own condition sets the numerator. Attendance % = rows where Status is Present or Remote ÷ working-day rows × 100.
+                </Callout>
+                <p>Empty values are skipped by Total, Average, Lowest and Highest. Every summary ends with a <b>Total</b> row that recalculates each column over all rows in the table, so the total of an average is the overall average, not a sum.</p>
+              </div>
+            ),
+          },
+          {
+            id: 'recipes', title: 'Recipes',
+            content: (
+              <div className="space-y-4">
+                {RECIPES.map((r) => (
+                  <div key={r.name}>
+                    <h4 className={term}>{r.name} <span className="font-normal text-fg-subtle">· {r.source}</span></h4>
+                    <ul className="mt-1 list-disc space-y-0.5 pl-5">{r.steps.map((s) => <li key={s}>{s}</li>)}</ul>
+                  </div>
+                ))}
+              </div>
+            ),
+          },
+          {
+            id: 'tips', title: 'Tips and limits',
+            content: (
+              <ul className="list-disc space-y-1.5 pl-5">
+                <li>Filter on <b>Day type is Working</b> for rates, otherwise weekends and holidays dilute them.</li>
+                <li>Durations (Worked, Late by, Overtime…) are typed in minutes in conditions: 1 hour = 60.</li>
+                <li>Use <b>Month</b> or <b>Weekday</b> as a column to trend over time; <b>Split into sections</b> gives one table per department or site.</li>
+                <li>Many columns? Turn on <b>Landscape PDF</b> (automatic above 7 columns).</li>
+                <li>Saved reports appear under <b>Export</b> and <b>Schedules</b> for everyone who can export.</li>
+                <li>Each source caps the date range per run (shown above); split longer periods into several exports.</li>
+              </ul>
+            ),
+          },
+        ]} />
+      </div>
+    </Modal>
   );
 }

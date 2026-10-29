@@ -1,10 +1,11 @@
-import { Badge, Button, Card, Switch, confirmAction, DataTable, DateInput, EmptyState, IconButton, PageHeader, Pagination, PillTabs, TextField } from '@iverto-org/core-ui';
+import { Badge, Button, Card, Switch, confirmAction, DataTable, DateInput, EmptyState, IconButton, PageHeader, Pagination, PillTabs, Select, TextField } from '@iverto-org/core-ui';
 import { Download, FileSpreadsheet, FileText, Plus, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { EmployeePicker, FormModal, Panel, Pick, SitePicker, useForm } from '../components/ui';
 import { del, downloadExport, patch, post, useAction, useApi, useDepartments, useUsers, type Page } from '../lib/api';
 import { isHr, isManager, useMe } from '../lib/auth';
-import { dateTime, REQUEST_STATUS, StatusBadge, today } from '../lib/format';
+import { browserTimezone, describeCron, fromCron, timezoneOptions, toCron, type Repeat } from '../lib/cron';
+import { dateTime, REQUEST_STATUS, StatusBadge, today, WEEKDAYS } from '../lib/format';
 import { awaitingDownload } from '../lib/live';
 import { CustomReports } from './ReportBuilder';
 
@@ -145,7 +146,7 @@ function Schedules() {
           columns={[
             { key: 'n', header: 'Name', render: (s) => <span className="font-semibold text-fg">{s.name}</span> },
             { key: 't', header: 'Report', render: (s) => `${types?.find((t) => t.type === s.type)?.title ?? s.type} · ${s.format.toUpperCase()}` },
-            { key: 'c', header: 'When', render: (s) => <span className="font-mono text-xs">{s.cron} ({s.timezone})</span> },
+            { key: 'c', header: 'When', render: (s) => <span>{describeCron(s.cron)} <span className="text-xs text-fg-subtle">{s.timezone.replace(/_/g, ' ')}</span></span> },
             { key: 'l', header: 'Last run', render: (s) => dateTime(s.lastRunAt) },
             { key: 'e', header: 'Enabled', render: (s) => <span onClick={(e) => e.stopPropagation()}><Switch label={s.enabled ? 'On' : 'Off'} checked={s.enabled} onChange={() => toggle.mutate(s)} /></span> },
           ]}
@@ -161,13 +162,17 @@ const pickSchedule = (s: Schedule) => ({ name: s.name, type: s.type, format: s.f
 function ScheduleForm({ schedule, types, onClose }: { schedule?: Schedule; types: ReportType[]; onClose: () => void }) {
   const me = useMe();
   const users = useUsers(isHr(me)).data ?? [];
+  const when = fromCron(schedule?.cron ?? '0 8 * * 1-5');
   const [f, set] = useForm({
     name: schedule?.name ?? '', type: schedule?.type ?? types[0]?.type ?? '', format: schedule?.format ?? 'pdf',
-    period: (schedule?.filters.period as string) ?? 'yesterday', cron: schedule?.cron ?? '0 8 * * *',
-    timezone: schedule?.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone, recipientUserIds: schedule?.recipientUserIds ?? [me.id],
+    period: (schedule?.filters.period as string) ?? 'yesterday',
+    // A cron the simple form can't show (set via the API) stays editable as "custom".
+    repeat: (when?.repeat ?? 'custom') as Repeat | 'custom', time: when?.time ?? '08:00', days: when?.days ?? [1], dayOfMonth: when?.dayOfMonth ?? 1, cron: schedule?.cron ?? '',
+    timezone: schedule?.timezone ?? browserTimezone(), recipientUserIds: schedule?.recipientUserIds ?? [me.id],
   });
   const def = types.find((t) => t.type === f.type);
-  const body = { name: f.name, type: f.type, format: f.format, filters: { ...schedule?.filters, period: f.period }, cron: f.cron, timezone: f.timezone, recipientUserIds: f.recipientUserIds, enabled: schedule?.enabled ?? true };
+  const cron = f.repeat === 'custom' ? f.cron : toCron({ ...f, repeat: f.repeat });
+  const body = { name: f.name, type: f.type, format: f.format, filters: { ...schedule?.filters, period: f.period }, cron, timezone: f.timezone, recipientUserIds: f.recipientUserIds, enabled: schedule?.enabled ?? true };
   const save = useAction(() => (schedule ? patch(`/reports/schedules/${schedule.id}`, body) : post('/reports/schedules', body)), { invalidate: ['/reports/schedules'], success: 'Schedule saved', onSuccess: onClose });
   const toggleRecipient = (id: string, on: boolean) => set('recipientUserIds')(on ? [...f.recipientUserIds, id] : f.recipientUserIds.filter((x) => x !== id));
   return (
@@ -176,8 +181,34 @@ function ScheduleForm({ schedule, types, onClose }: { schedule?: Schedule; types
       <Pick label="Report" required options={types.map((t) => ({ value: t.type, label: t.title, keywords: t.description }))} value={f.type} onChange={set('type')} />
       <Pick label="Format" required options={(def?.formats ?? ['pdf', 'csv']).map((x) => ({ value: x, label: x.toUpperCase() }))} value={f.format} onChange={(v) => set('format')(v as 'csv' | 'pdf')} />
       <Pick label="Covers" required options={PERIODS} value={f.period} onChange={set('period')} />
-      <TextField label="Cron" required value={f.cron} onChange={(e) => set('cron')(e.target.value)} hint="minute hour day month weekday — e.g. 0 8 * * 1 = Mondays 08:00" className="font-mono" />
-      <TextField label="Timezone" required value={f.timezone} onChange={(e) => set('timezone')(e.target.value)} />
+      <div className="grid grid-cols-2 gap-3">
+        <Select label="Repeat" required value={f.repeat} onChange={(e) => set('repeat')(e.target.value as Repeat | 'custom')} options={[
+          { value: 'daily', label: 'Every day' }, { value: 'weekdays', label: 'Weekdays (Mon–Fri)' }, { value: 'weekly', label: 'On certain days of the week' }, { value: 'monthly', label: 'Once a month' },
+          ...(when ? [] : [{ value: 'custom', label: 'Custom (advanced)' }]),
+        ]} />
+        {f.repeat !== 'custom' && <DateInput mode="time" label="At" required value={f.time} onChange={(e) => set('time')(e.target.value)} />}
+      </div>
+      {f.repeat === 'weekly' && (
+        <div className="space-y-1.5">
+          <p className="field-label">On</p>
+          <div className="flex flex-wrap gap-1.5">
+            {WEEKDAYS.map((d, i) => (
+              <button key={d} type="button" aria-pressed={f.days.includes(i)}
+                onClick={() => set('days')(f.days.includes(i) ? (f.days.length > 1 ? f.days.filter((x) => x !== i) : f.days) : [...f.days, i])}
+                className={`rounded-full border px-3 py-1 text-sm ${f.days.includes(i) ? 'border-brand bg-brand-soft font-semibold text-brand' : 'border-line text-fg-muted'}`}>
+                {d}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {f.repeat === 'monthly' && (
+        <Select label="Day of the month" required value={String(f.dayOfMonth)} onChange={(e) => set('dayOfMonth')(Number(e.target.value))}
+          options={Array.from({ length: 28 }, (_, i) => ({ value: String(i + 1), label: String(i + 1) }))} hint="Up to the 28th, so it runs every month" />
+      )}
+      {f.repeat === 'custom' && <TextField label="Cron expression" required value={f.cron} onChange={(e) => set('cron')(e.target.value)} hint="minute hour day month weekday" className="font-mono" />}
+      <Pick label="Timezone" required options={timezoneOptions(f.timezone)} value={f.timezone} onChange={set('timezone')} hint="The time above is in this timezone" />
+      <p className="text-sm text-fg-muted">Runs: <b className="text-fg">{describeCron(cron)}</b>, covering {PERIODS.find((p) => p.value === f.period)?.label.toLowerCase()}.</p>
       {isHr(me) && (
         <div className="space-y-2">
           <p className="field-label">Recipients</p>

@@ -27,7 +27,7 @@ import { ScopeService } from '../auth/scope.service';
 import { AppError } from '../common/errors';
 import { PrismaService } from '../common/prisma.service';
 import { BUCKETS, SupabaseService } from '../common/supabase.service';
-import { addDays, dbDate, formatLocal, localYmd, monthRange, ymdOf } from '../common/time';
+import { addDays, dbDate, formatLocal, leaveYearOf, leaveYearRange, localYmd, monthRange, ymdOf } from '../common/time';
 import { IsMonth, IsYmd } from '../common/validators';
 import { LeaveListQuery, LeaveModule, LeaveRequestDto, LeaveService, NoteDto } from '../leave/leave';
 import { LiveService } from '../live/live.module';
@@ -144,6 +144,20 @@ export class MobileService {
     };
   }
 
+  /**
+   * Admins/HR often have no linked employee record but still use the app for the
+   * team board and approvals; their self-service reads come back empty rather
+   * than 403 NO_EMPLOYEE, which the app treats as being locked out.
+   */
+  private selfOrNull(user: AuthUser) {
+    return user.employeeId ? this.scope.self(user) : Promise.resolve(null);
+  }
+
+  private async tenantTz(user: AuthUser) {
+    const tenant = await this.prisma.tenant.findUnique({ where: { id: user.tenantId } });
+    return ((tenant?.settings as any)?.timezone as string) || 'Asia/Kolkata';
+  }
+
   private async todayRow(employee: { id: string; tenantId: string; siteId: string }, date: string) {
     let day = await this.prisma.attendanceDay.findUnique({ where: { employeeId_workDate: { employeeId: employee.id, workDate: dbDate(date) } } });
     if (!day) {
@@ -160,7 +174,8 @@ export class MobileService {
   }
 
   async today(user: AuthUser) {
-    const employee = await this.scope.self(user);
+    const employee = await this.selfOrNull(user);
+    if (!employee) return { timezone: await this.tenantTz(user), now: new Date(), day: null, punches: [], nextShift: null, mobilePunch: { mode: 'NEVER', allowedNow: false } };
     const tz = employee.site.timezone;
     const now = new Date();
     // Attendance "today" is the work date whose window contains now (a night shift is still yesterday's).
@@ -202,16 +217,18 @@ export class MobileService {
   }
 
   async month(user: AuthUser, month: string) {
-    const employee = await this.scope.self(user);
+    const employee = await this.selfOrNull(user);
     const { from, to } = monthRange(month);
-    const days = await this.prisma.attendanceDay.findMany({
-      where: { employeeId: employee.id, workDate: { gte: dbDate(from), lte: dbDate(to) } },
-      orderBy: { workDate: 'asc' },
-    });
+    const days = employee
+      ? await this.prisma.attendanceDay.findMany({
+          where: { employeeId: employee.id, workDate: { gte: dbDate(from), lte: dbDate(to) } },
+          orderBy: { workDate: 'asc' },
+        })
+      : [];
     const count = (s: string) => days.filter((d) => d.status === s).length;
     return {
       month,
-      timezone: employee.site.timezone,
+      timezone: employee?.site.timezone ?? (await this.tenantTz(user)),
       days: days.map((d) => ({
         date: ymdOf(d.workDate),
         dayId: d.id,
@@ -241,7 +258,8 @@ export class MobileService {
   }
 
   async day(user: AuthUser, date: string) {
-    const employee = await this.scope.self(user);
+    const employee = await this.selfOrNull(user);
+    if (!employee) throw new AppError(404, 'NOT_FOUND', 'No attendance for that day');
     const day = await this.prisma.attendanceDay.findUnique({ where: { employeeId_workDate: { employeeId: employee.id, workDate: dbDate(date) } } });
     if (!day) throw new AppError(404, 'NOT_FOUND', 'No attendance for that day');
     const [punches, corrections, shift] = await Promise.all([
@@ -267,7 +285,8 @@ export class MobileService {
   }
 
   async scheduleFor(user: AuthUser, from?: string, to?: string) {
-    const employee = await this.scope.self(user);
+    const employee = await this.selfOrNull(user);
+    if (!employee) return { timezone: await this.tenantTz(user), days: [] };
     const start = from ?? localYmd(new Date(), employee.site.timezone);
     const end = to ?? addDays(start, 13);
     const grid = await this.schedule.grid(user, { from: start, to: end, employeeId: employee.id });
@@ -289,9 +308,9 @@ export class MobileService {
   }
 
   async holidays(user: AuthUser, year?: number) {
-    const employee = await this.scope.self(user);
-    const y = year ?? Number(localYmd(new Date(), employee.site.timezone).slice(0, 4));
-    if (!employee.site.holidayCalendarId) return { year: y, holidays: [] };
+    const employee = await this.selfOrNull(user);
+    const y = year ?? Number(localYmd(new Date(), employee?.site.timezone ?? (await this.tenantTz(user))).slice(0, 4));
+    if (!employee?.site.holidayCalendarId) return { year: y, holidays: [] };
     const rows = await this.prisma.holiday.findMany({
       where: { calendarId: employee.site.holidayCalendarId, date: { gte: dbDate(`${y}-01-01`), lte: dbDate(`${y}-12-31`) } },
       orderBy: { date: 'asc' },
@@ -300,8 +319,7 @@ export class MobileService {
   }
 
   async teamAttendance(user: AuthUser, date?: string) {
-    const tenant = await this.prisma.tenant.findUnique({ where: { id: user.tenantId } });
-    const d = date ?? localYmd(new Date(), ((tenant?.settings as any)?.timezone as string) || 'Asia/Kolkata');
+    const d = date ?? localYmd(new Date(), await this.tenantTz(user));
     const days = await this.prisma.attendanceDay.findMany({
       where: { tenantId: user.tenantId, workDate: dbDate(d), employee: await this.scope.employeeWhere(user) },
       include: { employee: true },
@@ -403,12 +421,17 @@ export class MobileController {
 
   @Get('leave/balances')
   balances(@CurrentUser() user: AuthUser, @Query() q: YearQuery) {
+    if (!user.employeeId) {
+      const leaveYear = q.year ?? leaveYearOf(localYmd(new Date(), 'UTC'));
+      return { employeeId: null, leaveYear, period: leaveYearRange(leaveYear), balances: [] };
+    }
     return this.leave.balances(user, undefined, q.year);
   }
 
   /** Types I can apply for, with the rules the form needs. */
   @Get('leave/types')
   async leaveTypes(@CurrentUser() user: AuthUser) {
+    if (!user.employeeId) return [];
     const { balances } = await this.leave.balances(user, undefined);
     const types = await this.prisma.leaveType.findMany({ where: { tenantId: user.tenantId, active: true }, orderBy: { code: 'asc' } });
     return types.map((t) => ({

@@ -7,7 +7,7 @@ import { CorrectionModal, DayDrawer } from '../components/DayDrawer';
 import { Decide, DepartmentSelect, EmployeePicker, FormModal, Panel, Pick, SiteSelect, useForm } from '../components/ui';
 import { post, useAction, useApi, useCursor, type Page } from '../lib/api';
 import { isHr, isManager, useMe } from '../lib/auth';
-import { DAY_STATUS, hm, REQUEST_STATUS, StatusBadge, today, toOptions } from '../lib/format';
+import { DAY_STATUS, hm, LIVE_STATE, REQUEST_STATUS, StatusBadge, today, toOptions } from '../lib/format';
 import type { Day, Punch } from '../lib/live';
 
 const filterRow = 'flex flex-col gap-2.5 sm:flex-row sm:flex-wrap sm:items-end sm:gap-x-4';
@@ -48,8 +48,9 @@ export function Daily() {
             { key: 'employee', header: 'Employee', render: (r) => <span className="font-semibold text-fg">{r.employee?.fullName}<span className="ml-2 font-mono text-xs text-fg-subtle">{r.employee?.employeeCode}</span></span> },
             { key: 'status', header: 'Status', render: (r) => (
               <span className="flex flex-wrap gap-1.5">
-                <StatusBadge value={r.status} />
-                {r.isLate && <Badge tone="warning">Late</Badge>}
+                {/* A day isn't judged until it ends; meanwhile show where the person is, as the dashboard does. */}
+                {r.status === 'PENDING' ? <StatusBadge value={r.liveState} map={LIVE_STATE} /> : <StatusBadge value={r.status} />}
+                {r.isLate && !(r.status === 'PENDING' && r.liveState.includes('LATE')) && <Badge tone="warning">Late</Badge>}
                 {r.missedPunch && <Badge tone="danger">Missed punch</Badge>}
               </span>
             ) },

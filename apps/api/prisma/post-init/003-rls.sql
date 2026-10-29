@@ -61,8 +61,10 @@ END $$;
 ALTER TABLE public.tenants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.tenants FORCE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS rls_tenant_isolation ON public.tenants;
+-- Org admins update their own row (PATCH /org: name, settings); status/slug are only
+-- changed by platform routes, which the API's DTOs enforce.
 CREATE POLICY rls_tenant_isolation ON public.tenants
-  USING (public.rls_tenant_allowed(id)) WITH CHECK (public.rls_is_system());
+  USING (public.rls_tenant_allowed(id)) WITH CHECK (public.rls_tenant_allowed(id));
 
 -- Audit: INSERT and SELECT only; the trigger in 002 rejects UPDATE/DELETE even for owners.
 ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;

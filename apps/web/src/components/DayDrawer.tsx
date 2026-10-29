@@ -3,7 +3,7 @@ import { ClipboardEdit } from 'lucide-react';
 import { useState } from 'react';
 import { post, useAction, useApi } from '../lib/api';
 import { isHr, useMe } from '../lib/auth';
-import { clock, hm, StatusBadge } from '../lib/format';
+import { clock, hm, LIVE_STATE, StatusBadge } from '../lib/format';
 import type { Day, Punch } from '../lib/live';
 import { EmployeePicker, FormModal, useForm } from './ui';
 
@@ -61,7 +61,7 @@ export function DayDrawer({ dayId, onClose }: { dayId: string | null; onClose: (
       ) : (
         <div className="space-y-6 p-5 sm:p-6">
           <div className="flex flex-wrap items-center gap-2">
-            <StatusBadge value={day.status} />
+            {day.status === 'PENDING' ? <StatusBadge value={day.liveState} map={LIVE_STATE} /> : <StatusBadge value={day.status} />}
             {day.isLate && <Badge tone="warning">Late {day.lateMinutes} min</Badge>}
             {day.isEarlyExit && <Badge tone="warning">Left early {day.earlyExitMinutes} min</Badge>}
             {day.missedPunch && <Badge tone="danger">Missed punch</Badge>}

@@ -1,5 +1,5 @@
 import {
-  AppearanceSettings, Badge, Button, Callout, Card, CenteredSpinner, CopyField, DataTable, EmptyState, IconButton, Pagination, PasswordStrength, Select, SettingsLayout, TextField, confirmAction,
+  AppearanceSettings, Badge, Button, Callout, Card, CenteredSpinner, CopyField, DataTable, DescriptionList, EmptyState, IconButton, Modal, Pagination, PasswordStrength, Select, SettingsLayout, TextField, confirmAction,
 } from '@iverto-org/core-ui';
 import { Building2, ClipboardList, KeyRound, Layers, MapPin, Palette, Plus, Scale, ShieldCheck, Users, FolderKanban, UserX, UserCheck } from 'lucide-react';
 import { useState } from 'react';
@@ -8,6 +8,7 @@ import { Crud } from '../components/Crud';
 import { clean, EmployeePicker, Fields, FormModal, Panel, Pick, useForm } from '../components/ui';
 import { changeOwnPassword, del, patch, post, useAction, useApi, useCalendars, useUsers, type Page, type UserProfile } from '../lib/api';
 import { isHr, useMe } from '../lib/auth';
+import { actionTone, auditFields, humanize } from '../lib/audit';
 import { dateTime, REQUEST_STATUS, ROLE_LABEL, ROLES, StatusBadge } from '../lib/format';
 
 export function Settings() {
@@ -241,27 +242,63 @@ interface AuditRow { id: string; action: string; actorUserId: string | null; act
 function Audit() {
   const [page, setPage] = useState(1);
   const [action, setAction] = useState('');
+  const [open, setOpen] = useState<AuditRow | null>(null);
   const size = 50;
   const { data, isLoading } = useApi<Page<AuditRow>>('/audit-logs', { action, page, size });
   const users = useUsers().data ?? [];
-  const who = (id: string | null, type: string) => users.find((u) => u.userId === id)?.displayName ?? (type === 'user' ? id?.slice(0, 8) : type);
+  const who = (id: string | null, type: string) => users.find((u) => u.userId === id)?.displayName ?? (type === 'user' ? `User ${id?.slice(0, 8) ?? ''}` : humanize(type));
+  const on = (r: AuditRow) => (r.targetType ? `${humanize(r.targetType)}${r.targetId ? ` · ${r.targetId.slice(0, 8)}` : ''}` : '—');
+  const fields = open ? auditFields(open.payload) : [];
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-3">
-        <div><h2 className="text-lg font-bold text-fg">Audit log</h2><p className="text-sm text-fg-muted">Append-only: every approval, correction, export and role change.</p></div>
-        <TextField label="Action" hideLabel placeholder="Filter by action, e.g. LEAVE_APPROVED" value={action} onChange={(e) => { setAction(e.target.value.toUpperCase()); setPage(1); }} containerClassName="w-full sm:w-72" />
+        <div><h2 className="text-lg font-bold text-fg">Audit log</h2><p className="text-sm text-fg-muted">Append-only: every approval, correction, export and role change. Click an entry for its details.</p></div>
+        <TextField label="Action" hideLabel placeholder="Filter by action, e.g. LEAVE_APPROVED" value={action} onChange={(e) => { setAction(e.target.value.toUpperCase().replaceAll(' ', '_')); setPage(1); }} containerClassName="w-full sm:w-72" />
       </div>
       <Panel>
-        <DataTable rows={data?.items ?? []} getRowKey={(r) => r.id} loading={isLoading} empty={<EmptyState icon={ShieldCheck} title="No audit entries match" />}
+        <DataTable rows={data?.items ?? []} getRowKey={(r) => r.id} loading={isLoading} onRowClick={setOpen} empty={<EmptyState icon={ShieldCheck} title="No audit entries match" />}
           columns={[
-            { key: 't', header: 'When', render: (r) => dateTime(r.createdAt) },
-            { key: 'a', header: 'Action', render: (r) => <span className="font-mono text-xs font-semibold">{r.action}</span> },
+            { key: 't', header: 'When', render: (r) => <span className="whitespace-nowrap">{dateTime(r.createdAt)}</span> },
+            { key: 'a', header: 'Action', render: (r) => <Badge tone={actionTone(r.action)}>{humanize(r.action)}</Badge> },
             { key: 'w', header: 'Who', render: (r) => who(r.actorUserId, r.actorType) },
-            { key: 'o', header: 'On', render: (r) => (r.targetType ? `${r.targetType}${r.targetId ? ` ${r.targetId.slice(0, 8)}` : ''}` : '—') },
-            { key: 'p', header: 'Detail', render: (r) => <span className="line-clamp-2 font-mono text-xs text-fg-muted">{r.payload ? JSON.stringify(r.payload) : ''}</span> },
+            { key: 'o', header: 'On', render: (r) => <span className="text-fg-muted">{on(r)}</span> },
+            { key: 'p', header: 'Detail', render: (r) => {
+              const f = auditFields(r.payload);
+              if (!f.length) return <span className="text-fg-subtle">—</span>;
+              return (
+                <span className="line-clamp-2 text-xs text-fg-muted">
+                  {f.slice(0, 3).map((x, i) => <span key={x.term}>{i > 0 && ' · '}<span className="font-semibold text-fg-secondary">{x.term}:</span> {x.value}</span>)}
+                  {f.length > 3 && <span className="text-fg-subtle"> · +{f.length - 3} more</span>}
+                </span>
+              );
+            } },
           ]} />
       </Panel>
       {data && data.total > size && <Pagination page={page} pageCount={Math.ceil(data.total / size)} onPageChange={setPage} total={data.total} pageSize={size} noun="entries" />}
+      {open && (
+        <Modal open onClose={() => setOpen(null)} size="lg" title={humanize(open.action)} description={`${dateTime(open.createdAt)} · ${who(open.actorUserId, open.actorType)}`}>
+          <div className="space-y-5">
+            <DescriptionList columns={2} items={[
+              { term: 'Action', value: <Badge tone={actionTone(open.action)}>{open.action}</Badge> },
+              { term: 'By', value: who(open.actorUserId, open.actorType) },
+              { term: 'On', value: open.targetType ? humanize(open.targetType) : '—' },
+              { term: 'Record ID', value: open.targetId ? <span className="font-mono text-xs break-all">{open.targetId}</span> : '—' },
+            ]} />
+            {fields.length > 0 && (
+              <div>
+                <h3 className="mb-2 text-sm font-semibold text-fg">Details</h3>
+                <DescriptionList columns={2} items={fields.map((f) => ({ term: f.term, value: <span className="break-words">{f.value}</span>, wide: f.value.length > 40 }))} />
+              </div>
+            )}
+            {open.payload != null && (
+              <details className="rounded-xl border border-line">
+                <summary className="cursor-pointer px-3 py-2 text-xs font-semibold text-fg-muted">Raw payload</summary>
+                <pre className="max-h-72 overflow-auto border-t border-line px-3 py-2 font-mono text-xs text-fg-secondary">{JSON.stringify(open.payload, null, 2)}</pre>
+              </details>
+            )}
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }

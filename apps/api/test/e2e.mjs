@@ -319,6 +319,11 @@ try {
   ok(r.status === 400 && r.body.code === 'FILE_TYPE_MISMATCH', 'upload magic-byte check', r.body);
   r = await call(manager, 'GET', '/mobile/team/live');
   ok(r.status === 200 && r.body.people.length === 3, 'team live', r.body);
+  // The provisioned admin has no employee record: the app must still open for them.
+  for (const path of ['/mobile/today', `/mobile/attendance?month=${today().slice(0, 7)}`, '/mobile/schedule', '/mobile/holidays', '/mobile/leave/balances', '/mobile/leave/types', '/mobile/team/live', '/mobile/approvals?type=leave']) {
+    r = await call(admin, 'GET', path);
+    ok(r.status === 200, `unlinked admin can open ${path}`, r.body);
+  }
 
   console.log('11. Reports');
   const month = today().slice(0, 7);

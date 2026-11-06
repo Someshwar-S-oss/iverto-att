@@ -1,5 +1,5 @@
 generator client {
-  provider        = "prisma-client-js"
+  provider = "prisma-client-js"
 }
 
 datasource db {
@@ -35,6 +35,11 @@ model Site {
   address           String?
   timezone          String   @default("Asia/Kolkata")
   holidayCalendarId String?  @map("holiday_calendar_id")
+  /// Geofence for mobile punches: inside ⇒ auto-approved; outside ⇒ manual review, or refused when strict.
+  lat               Float?
+  lng               Float?
+  geofenceRadiusM   Int?     @map("geofence_radius_m")
+  geofenceStrict    Boolean  @default(false) @map("geofence_strict")
   createdAt         DateTime @default(now()) @map("created_at")
 
   employees Employee[]
@@ -114,32 +119,38 @@ model Holiday {
 
 /// Thresholds for the attendance engine (§6.2). One default per tenant, optional per department.
 model AttendancePolicy {
-  id                  String   @id @default(cuid())
-  tenantId            String   @map("tenant_id")
-  name                String
-  isDefault           Boolean  @default(false) @map("is_default")
-  graceInMinutes      Int      @default(10) @map("grace_in_minutes")
-  graceOutMinutes     Int      @default(10) @map("grace_out_minutes")
+  id                    String   @id @default(cuid())
+  tenantId              String   @map("tenant_id")
+  name                  String
+  isDefault             Boolean  @default(false) @map("is_default")
+  graceInMinutes        Int      @default(10) @map("grace_in_minutes")
+  graceOutMinutes       Int      @default(10) @map("grace_out_minutes")
   /// Percent of required minutes.
-  halfDayMinPercent   Int      @default(50) @map("half_day_min_percent")
-  fullDayMinPercent   Int      @default(90) @map("full_day_min_percent")
-  earlyWindowMinutes  Int      @default(180) @map("early_window_minutes")
-  lateWindowMinutes   Int      @default(360) @map("late_window_minutes")
-  duplicatePunchSeconds Int    @default(60) @map("duplicate_punch_seconds")
-  minSessionMinutes   Int      @default(5) @map("min_session_minutes")
-  absentAfterMinutes  Int      @default(120) @map("absent_after_minutes")
-  missedOutCredit     String   @default("NONE") @map("missed_out_credit") // NONE | UNTIL_SHIFT_END
-  overtimeEnabled     Boolean  @default(false) @map("overtime_enabled")
-  overtimeMinMinutes  Int      @default(30) @map("overtime_min_minutes")
-  breakDeduction      String   @default("SHIFT_BREAK") @map("break_deduction") // SHIFT_BREAK | NONE
-  roundingMinutes     Int      @default(0) @map("rounding_minutes")
-  minRestHours        Int      @default(8) @map("min_rest_hours")
-  maxWeeklyHours      Int      @default(60) @map("max_weekly_hours")
+  halfDayMinPercent     Int      @default(50) @map("half_day_min_percent")
+  fullDayMinPercent     Int      @default(90) @map("full_day_min_percent")
+  earlyWindowMinutes    Int      @default(180) @map("early_window_minutes")
+  lateWindowMinutes     Int      @default(360) @map("late_window_minutes")
+  duplicatePunchSeconds Int      @default(60) @map("duplicate_punch_seconds")
+  minSessionMinutes     Int      @default(5) @map("min_session_minutes")
+  absentAfterMinutes    Int      @default(120) @map("absent_after_minutes")
+  missedOutCredit       String   @default("NONE") @map("missed_out_credit") // NONE | UNTIL_SHIFT_END
+  overtimeEnabled       Boolean  @default(false) @map("overtime_enabled")
+  overtimeMinMinutes    Int      @default(30) @map("overtime_min_minutes")
+  breakDeduction        String   @default("SHIFT_BREAK") @map("break_deduction") // SHIFT_BREAK | NONE
+  roundingMinutes       Int      @default(0) @map("rounding_minutes")
+  minRestHours          Int      @default(8) @map("min_rest_hours")
+  maxWeeklyHours        Int      @default(60) @map("max_weekly_hours")
   /// Every `lateDeductionEvery` late days in a month deducts this much attendance.
-  lateDeduction       String   @default("NONE") @map("late_deduction") // NONE | HALF_DAY | FULL_DAY
-  lateDeductionEvery  Int      @default(2) @map("late_deduction_every")
-  createdAt           DateTime @default(now()) @map("created_at")
-  updatedAt           DateTime @updatedAt @map("updated_at")
+  lateDeduction         String   @default("NONE") @map("late_deduction") // NONE | HALF_DAY | FULL_DAY
+  lateDeductionEvery    Int      @default(2) @map("late_deduction_every")
+  /// Late penalty also counts early exits (an early exit without approved permission).
+  earlyExitCountsAsLate Boolean  @default(false) @map("early_exit_counts_as_late")
+  /// Days deducted per absent working day (no approved leave). 1.5 = "unauthorised leave costs 1.5 days".
+  absenceDeduction      Float    @default(1) @map("absence_deduction")
+  /// Bidirectional-terminal punches: FIRST_LAST = one session; ALTERNATE = in, out, in, out (multiple sessions a day).
+  pairing               String   @default("FIRST_LAST")
+  createdAt             DateTime @default(now()) @map("created_at")
+  updatedAt             DateTime @updatedAt @map("updated_at")
 
   @@map("attendance_policies")
 }
@@ -151,7 +162,7 @@ model UserProfile {
   userId             String   @id @map("user_id")
   tenantId           String?  @map("tenant_id")
   employeeId         String?  @unique @map("employee_id")
-  role               String   // ADMIN | HR | MANAGER | EMPLOYEE | PLATFORM_ADMIN
+  role               String // ADMIN | HR | MANAGER | EMPLOYEE | PLATFORM_ADMIN
   displayName        String   @map("display_name")
   email              String
   siteIds            String[] @default([]) @map("site_ids")
@@ -175,9 +186,11 @@ model Employee {
   phone              String?
   designation        String?
   employmentType     String    @default("FULL_TIME") @map("employment_type")
-  joinedOn           DateTime  @db.Date @map("joined_on")
-  exitOn             DateTime? @db.Date @map("exit_on")
+  joinedOn           DateTime  @map("joined_on") @db.Date
+  exitOn             DateTime? @map("exit_on") @db.Date
   mobilePunch        String    @default("NEVER") @map("mobile_punch") // NEVER | REMOTE_DAYS | ALWAYS | FULL_REMOTE
+  /// Per-person override of the leave policy: { [leaveTypeId]: amount per accrual }; 0 = not eligible.
+  leaveEntitlements  Json      @default("{}") @map("leave_entitlements")
   status             String    @default("ACTIVE") // ACTIVE | EXITED
   userId             String?   @unique @map("user_id")
   biometricConsentAt DateTime? @map("biometric_consent_at")
@@ -185,17 +198,17 @@ model Employee {
   createdAt          DateTime  @default(now()) @map("created_at")
   updatedAt          DateTime  @updatedAt @map("updated_at")
 
-  site         Site        @relation(fields: [siteId], references: [id])
-  department   Department? @relation(fields: [departmentId], references: [id])
-  manager      Employee?   @relation("Reports", fields: [managerId], references: [id])
-  reports      Employee[]  @relation("Reports")
-  days         AttendanceDay[]
-  punches      Punch[]
-  leaveRequests LeaveRequest[]
+  site           Site                   @relation(fields: [siteId], references: [id])
+  department     Department?            @relation(fields: [departmentId], references: [id])
+  manager        Employee?              @relation("Reports", fields: [managerId], references: [id])
+  reports        Employee[]             @relation("Reports")
+  days           AttendanceDay[]
+  punches        Punch[]
+  leaveRequests  LeaveRequest[]
   remoteRequests RemoteWorkRequest[]
-  corrections  AttendanceCorrection[]
-  projects     EmployeeProject[]
-  fieldVisits  FieldVisit[]
+  corrections    AttendanceCorrection[]
+  projects       EmployeeProject[]
+  fieldVisits    FieldVisit[]
 
   @@unique([tenantId, employeeCode])
   @@index([tenantId, status])
@@ -213,7 +226,7 @@ model Device {
   serialNo      String    @unique @map("serial_no")
   name          String?
   gateName      String    @map("gate_name")
-  direction     String    // IN | OUT | BOTH
+  direction     String // IN | OUT | BOTH
   clockTimezone String?   @map("clock_timezone") // null ⇒ site timezone
   terminalToken String?   @map("terminal_token")
   terminalType  String?   @map("terminal_type")
@@ -279,17 +292,17 @@ model TerminalFaceTemplate {
 /// Immutable. Corrections are new rows with source = CORRECTION (D5).
 model Punch {
   id             String    @default(cuid())
-  punchedAt      DateTime  @db.Timestamptz(3) @map("punched_at")
+  punchedAt      DateTime  @map("punched_at") @db.Timestamptz(3)
   tenantId       String    @map("tenant_id")
   siteId         String    @map("site_id")
   employeeId     String?   @map("employee_id") // null = UNKNOWN slot
   deviceId       String?   @map("device_id")
   terminalUserId Int?      @map("terminal_user_id")
   deviceLogId    Int?      @map("device_log_id")
-  source         String    // TERMINAL | MOBILE | CORRECTION | MANUAL
-  direction      String    // in | out | unknown
+  source         String // TERMINAL | MOBILE | CORRECTION | MANUAL
+  direction      String // in | out | unknown
   outcome        String    @default("GRANTED") // GRANTED | DENIED | UNKNOWN
-  workDate       DateTime? @db.Date @map("work_date")
+  workDate       DateTime? @map("work_date") @db.Date
   lat            Float?
   lng            Float?
   accuracy       Float?
@@ -322,25 +335,25 @@ model AttendanceDay {
   tenantId          String    @map("tenant_id")
   siteId            String    @map("site_id")
   employeeId        String    @map("employee_id")
-  workDate          DateTime  @db.Date @map("work_date")
+  workDate          DateTime  @map("work_date") @db.Date
   timezone          String
   dayType           String    @map("day_type") // WORKING | WEEKLY_OFF | HOLIDAY
   holidayName       String?   @map("holiday_name")
   shiftId           String?   @map("shift_id")
   shiftKind         String?   @map("shift_kind") // FIXED | FLEXIBLE
   shiftBreakMinutes Int       @default(0) @map("shift_break_minutes")
-  schedStart        DateTime? @db.Timestamptz(3) @map("sched_start")
-  schedEnd          DateTime? @db.Timestamptz(3) @map("sched_end")
-  coreStart         DateTime? @db.Timestamptz(3) @map("core_start")
-  coreEnd           DateTime? @db.Timestamptz(3) @map("core_end")
-  windowStart       DateTime  @db.Timestamptz(3) @map("window_start")
-  windowEnd         DateTime  @db.Timestamptz(3) @map("window_end")
+  schedStart        DateTime? @map("sched_start") @db.Timestamptz(3)
+  schedEnd          DateTime? @map("sched_end") @db.Timestamptz(3)
+  coreStart         DateTime? @map("core_start") @db.Timestamptz(3)
+  coreEnd           DateTime? @map("core_end") @db.Timestamptz(3)
+  windowStart       DateTime  @map("window_start") @db.Timestamptz(3)
+  windowEnd         DateTime  @map("window_end") @db.Timestamptz(3)
   requiredMinutes   Int       @default(0) @map("required_minutes")
   policyId          String?   @map("policy_id")
   /// The policy values this day is judged with, frozen at materialisation.
   policy            Json      @default("{}")
-  firstIn           DateTime? @db.Timestamptz(3) @map("first_in")
-  lastOut           DateTime? @db.Timestamptz(3) @map("last_out")
+  firstIn           DateTime? @map("first_in") @db.Timestamptz(3)
+  lastOut           DateTime? @map("last_out") @db.Timestamptz(3)
   segments          Json      @default("[]")
   workedMinutes     Int       @default(0) @map("worked_minutes")
   breakMinutes      Int       @default(0) @map("break_minutes")
@@ -355,9 +368,11 @@ model AttendanceDay {
   missedPunch       Boolean   @default(false) @map("missed_punch")
   workedOnOffDay    Boolean   @default(false) @map("worked_on_off_day")
   hasLeaveConflict  Boolean   @default(false) @map("has_leave_conflict")
-  leavePortion      Decimal   @default(0) @db.Decimal(2, 1) @map("leave_portion")
+  leavePortion      Decimal   @default(0) @map("leave_portion") @db.Decimal(2, 1)
   leaveHalf         String?   @map("leave_half") // FIRST | SECOND
   leaveTypeId       String?   @map("leave_type_id")
+  /// Approved hourly leave (permission) on this day.
+  permissionMinutes Int       @default(0) @map("permission_minutes")
   remote            Boolean   @default(false)
   corrected         Boolean   @default(false)
   finalizedAt       DateTime? @map("finalized_at")
@@ -376,9 +391,9 @@ model AttendanceCorrection {
   id           String    @id @default(cuid())
   tenantId     String    @map("tenant_id")
   employeeId   String    @map("employee_id")
-  workDate     DateTime  @db.Date @map("work_date")
-  inAt         DateTime? @db.Timestamptz(3) @map("in_at")
-  outAt        DateTime? @db.Timestamptz(3) @map("out_at")
+  workDate     DateTime  @map("work_date") @db.Date
+  inAt         DateTime? @map("in_at") @db.Timestamptz(3)
+  outAt        DateTime? @map("out_at") @db.Timestamptz(3)
   reason       String
   status       String    @default("PENDING") // PENDING | APPROVED | REJECTED | CANCELLED
   requestedBy  String    @map("requested_by")
@@ -404,7 +419,7 @@ model FieldVisit {
   tenantId       String   @map("tenant_id")
   employeeId     String   @map("employee_id")
   /// Server time when received — the device clock is not trusted (§9).
-  takenAt        DateTime @db.Timestamptz(3) @map("taken_at")
+  takenAt        DateTime @map("taken_at") @db.Timestamptz(3)
   lat            Float
   lng            Float
   accuracy       Float
@@ -462,13 +477,13 @@ model EmployeeSchedule {
   id            String    @id @default(cuid())
   tenantId      String    @map("tenant_id")
   employeeId    String    @map("employee_id")
-  effectiveFrom DateTime  @db.Date @map("effective_from")
-  effectiveTo   DateTime? @db.Date @map("effective_to")
+  effectiveFrom DateTime  @map("effective_from") @db.Date
+  effectiveTo   DateTime? @map("effective_to") @db.Date
   shiftId       String?   @map("shift_id")
   /// 0 = Sunday … 6 = Saturday
   weeklyOffs    Int[]     @default([]) @map("weekly_offs")
   patternId     String?   @map("pattern_id")
-  anchorDate    DateTime? @db.Date @map("anchor_date")
+  anchorDate    DateTime? @map("anchor_date") @db.Date
   createdBy     String?   @map("created_by")
   createdAt     DateTime  @default(now()) @map("created_at")
 
@@ -493,24 +508,34 @@ model RosterOverride {
 // ── Leave ───────────────────────────────────────────────────────────────────
 
 model LeaveType {
-  id                 String   @id @default(cuid())
-  tenantId           String   @map("tenant_id")
-  code               String
-  name               String
-  color              String   @default("#2563eb")
-  paid               Boolean  @default(true)
-  active             Boolean  @default(true)
-  allowHalfDay       Boolean  @default(true) @map("allow_half_day")
-  accrualKind        String   @default("NONE") @map("accrual_kind") // NONE | MONTHLY | YEARLY_UPFRONT
-  accrualAmount      Decimal  @default(0) @db.Decimal(5, 1) @map("accrual_amount")
-  maxBalance         Decimal? @db.Decimal(5, 1) @map("max_balance")
-  carryForwardMax    Decimal? @db.Decimal(5, 1) @map("carry_forward_max")
-  allowNegative      Boolean  @default(false) @map("allow_negative")
-  requiresAttachment Boolean  @default(false) @map("requires_attachment")
-  minNoticeDays      Int      @default(0) @map("min_notice_days")
-  countsOffDays      Boolean  @default(false) @map("counts_off_days")
-  requiresHrApproval Boolean  @default(false) @map("requires_hr_approval")
-  createdAt          DateTime @default(now()) @map("created_at")
+  id                  String   @id @default(cuid())
+  tenantId            String   @map("tenant_id")
+  code                String
+  name                String
+  color               String   @default("#2563eb")
+  paid                Boolean  @default(true)
+  active              Boolean  @default(true)
+  allowHalfDay        Boolean  @default(true) @map("allow_half_day")
+  /// DAYS, or HOURS (permission): an hourly type is limited by its monthly quota only, never the ledger.
+  unit                String   @default("DAYS")
+  /// UNLIMITED = no balance (LOP, permission): only the monthly quota limits it.
+  accrualKind         String   @default("NONE") @map("accrual_kind") // NONE | MONTHLY | YEARLY_UPFRONT | UNLIMITED
+  accrualAmount       Decimal  @default(0) @map("accrual_amount") @db.Decimal(5, 1)
+  maxBalance          Decimal? @map("max_balance") @db.Decimal(5, 1)
+  carryForwardMax     Decimal? @map("carry_forward_max") @db.Decimal(5, 1)
+  allowNegative       Boolean  @default(false) @map("allow_negative")
+  requiresAttachment  Boolean  @default(false) @map("requires_attachment")
+  minNoticeDays       Int      @default(0) @map("min_notice_days")
+  countsOffDays       Boolean  @default(false) @map("counts_off_days")
+  requiresHrApproval  Boolean  @default(false) @map("requires_hr_approval")
+  /// Blanket policy per employment type: { [employmentType]: amount per accrual }; missing = accrualAmount, 0 = not eligible.
+  entitlements        Json     @default("{}")
+  /// Eligible (and accruing) only after this many days of service — probation.
+  minServiceDays      Int      @default(0) @map("min_service_days")
+  /// Per calendar month, pending + approved: at most this many days/hours, in at most this many requests.
+  maxPerMonth         Decimal? @map("max_per_month") @db.Decimal(5, 1)
+  maxRequestsPerMonth Int?     @map("max_requests_per_month")
+  createdAt           DateTime @default(now()) @map("created_at")
 
   requests LeaveRequest[]
 
@@ -526,7 +551,7 @@ model LeaveLedger {
   leaveTypeId String   @map("leave_type_id")
   leaveYear   Int      @map("leave_year")
   delta       Decimal  @db.Decimal(5, 1)
-  kind        String   // OPENING | ACCRUAL | DEBIT | REVERSAL | ADJUSTMENT | CARRY_FORWARD | LAPSE | COMP_CREDIT
+  kind        String // OPENING | ACCRUAL | DEBIT | REVERSAL | ADJUSTMENT | CARRY_FORWARD | LAPSE | COMP_CREDIT
   requestId   String?  @map("request_id")
   /// Idempotency key for jobs, e.g. "ACCRUAL:2026-10", "CF:2027".
   periodKey   String?  @map("period_key")
@@ -544,10 +569,14 @@ model LeaveRequest {
   tenantId          String    @map("tenant_id")
   employeeId        String    @map("employee_id")
   leaveTypeId       String    @map("leave_type_id")
-  startDate         DateTime  @db.Date @map("start_date")
-  endDate           DateTime  @db.Date @map("end_date")
+  startDate         DateTime  @map("start_date") @db.Date
+  endDate           DateTime  @map("end_date") @db.Date
   startHalf         String?   @map("start_half") // FIRST | SECOND
   endHalf           String?   @map("end_half")
+  /// Hourly types only: local "HH:mm" on startDate, and the length. `days` is 0 for these.
+  startTime         String?   @map("start_time")
+  endTime           String?   @map("end_time")
+  minutes           Int?
   days              Decimal   @db.Decimal(5, 1)
   reason            String?
   attachmentKey     String?   @map("attachment_key")
@@ -569,18 +598,21 @@ model LeaveRequest {
 }
 
 model RemoteWorkRequest {
-  id           String    @id @default(cuid())
-  tenantId     String    @map("tenant_id")
-  employeeId   String    @map("employee_id")
-  startDate    DateTime  @db.Date @map("start_date")
-  endDate      DateTime  @db.Date @map("end_date")
-  reason       String?
-  status       String    @default("PENDING")
-  approverId   String?   @map("approver_id")
-  decidedAt    DateTime? @map("decided_at")
-  decisionNote String?   @map("decision_note")
-  createdBy    String?   @map("created_by")
-  createdAt    DateTime  @default(now()) @map("created_at")
+  id                String    @id @default(cuid())
+  tenantId          String    @map("tenant_id")
+  employeeId        String    @map("employee_id")
+  startDate         DateTime  @map("start_date") @db.Date
+  endDate           DateTime  @map("end_date") @db.Date
+  reason            String?
+  status            String    @default("PENDING")
+  /// Two-level approval (org setting remoteRequiresHrApproval): the manager's step.
+  managerApproverId String?   @map("manager_approver_id")
+  managerDecidedAt  DateTime? @map("manager_decided_at")
+  approverId        String?   @map("approver_id")
+  decidedAt         DateTime? @map("decided_at")
+  decisionNote      String?   @map("decision_note")
+  createdBy         String?   @map("created_by")
+  createdAt         DateTime  @default(now()) @map("created_at")
 
   employee Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
 
@@ -597,7 +629,7 @@ model ReportJob {
   requestedBy String?   @map("requested_by")
   scheduleId  String?   @map("schedule_id")
   type        String
-  format      String    // csv | pdf
+  format      String // csv | pdf
   filters     Json
   /// The scope the report was generated under (§13).
   scope       Json

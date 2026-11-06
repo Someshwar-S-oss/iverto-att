@@ -2,7 +2,7 @@ import { Body, Controller, Delete, Get, Injectable, Logger, Module, Param, Patch
 import { ApiTags } from '@nestjs/swagger';
 import { Employee, LeaveRequest, LeaveType, Prisma } from '@prisma/client';
 import { Transform, Type } from 'class-transformer';
-import { IsBoolean, IsHexColor, IsIn, IsInt, IsNumber, IsOptional, IsString, Matches, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { IsBoolean, IsHexColor, IsIn, IsInt, IsNumber, IsObject, IsOptional, IsString, Matches, Max, MaxLength, Min, MinLength } from 'class-validator';
 import { resolveDay } from '../attendance/engine/schedule';
 import { RecomputeQueue } from '../attendance/recompute.service';
 import { RosterService } from '../attendance/roster.service';
@@ -10,13 +10,14 @@ import { AuditableActionService } from '../audit/audit.service';
 import { actorOf, AuthUser, CurrentUser, isHrOrAdmin, Roles } from '../auth/auth.types';
 import { ScopeService } from '../auth/scope.service';
 import { AppError } from '../common/errors';
+import { approvalTrack, approverNames } from '../common/approval';
 import { PrismaService } from '../common/prisma.service';
 import { runAsSystem } from '../common/rls';
 import { BUCKETS, SupabaseService } from '../common/supabase.service';
 import { addDays, dbDate, diffDays, leaveYearOf, leaveYearRange, localYmd, monthRange, Ymd, ymdOf } from '../common/time';
-import { IsYmd } from '../common/validators';
+import { IsHm, IsYmd } from '../common/validators';
 import { NotificationsService } from '../notifications/notifications';
-import { carryForwardOf, Half, leaveDays } from './leave-days';
+import { carryForwardOf, eligibleFrom, entitlementOf, Half, leaveDays, monthlyUsage } from './leave-days';
 
 // ── DTOs ────────────────────────────────────────────────────────────────────
 
@@ -27,7 +28,8 @@ export class LeaveTypeDto {
   @IsOptional() @IsBoolean() paid?: boolean;
   @IsOptional() @IsBoolean() active?: boolean;
   @IsOptional() @IsBoolean() allowHalfDay?: boolean;
-  @IsOptional() @IsIn(['NONE', 'MONTHLY', 'YEARLY_UPFRONT']) accrualKind?: string;
+  @IsOptional() @IsIn(['DAYS', 'HOURS']) unit?: string;
+  @IsOptional() @IsIn(['NONE', 'MONTHLY', 'YEARLY_UPFRONT', 'UNLIMITED']) accrualKind?: string;
   @IsOptional() @Type(() => Number) @IsNumber({ maxDecimalPlaces: 1 }) @Min(0) @Max(366) accrualAmount?: number;
   @IsOptional() @Type(() => Number) @IsNumber({ maxDecimalPlaces: 1 }) @Min(0) @Max(999) maxBalance?: number | null;
   @IsOptional() @Type(() => Number) @IsNumber({ maxDecimalPlaces: 1 }) @Min(0) @Max(999) carryForwardMax?: number | null;
@@ -36,6 +38,31 @@ export class LeaveTypeDto {
   @IsOptional() @Type(() => Number) @IsInt() @Min(0) @Max(365) minNoticeDays?: number;
   @IsOptional() @IsBoolean() countsOffDays?: boolean;
   @IsOptional() @IsBoolean() requiresHrApproval?: boolean;
+  /** { [employmentType]: amount per accrual }, 0 = not eligible. Checked by `assertAmounts`. */
+  @IsOptional() @IsObject() entitlements?: Record<string, number>;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(0) @Max(3650) minServiceDays?: number;
+  @IsOptional() @Type(() => Number) @IsNumber({ maxDecimalPlaces: 1 }) @Min(0.5) @Max(744) maxPerMonth?: number | null;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(31) maxRequestsPerMonth?: number | null;
+}
+
+export class EntitlementDto {
+  @IsString() employeeId: string;
+  @IsString() leaveTypeId: string;
+  /** Amount per accrual for this person; 0 = not eligible; null = back to the blanket policy. */
+  @IsOptional() @Type(() => Number) @IsNumber({ maxDecimalPlaces: 1 }) @Min(0) @Max(366) amount?: number | null;
+}
+
+/** Entitlement maps: employment-type keys to amounts in 0…366. */
+function assertAmounts(map: unknown) {
+  if (map === undefined) return;
+  const ok = map && typeof map === 'object' && !Array.isArray(map) &&
+    Object.entries(map).every(([k, v]) => /^[A-Z0-9_]{1,20}$/.test(k) && typeof v === 'number' && v >= 0 && v <= 366 && Math.round(v * 10) === v * 10);
+  if (!ok) throw new AppError(400, 'BAD_ENTITLEMENTS', 'entitlements must map employment types to amounts between 0 and 366');
+}
+
+/** HOURS types have no ledger, so they must be UNLIMITED (the DB checks this too). */
+function assertUnit(t: { unit?: string; accrualKind?: string }) {
+  if (t.unit === 'HOURS' && t.accrualKind !== 'UNLIMITED') throw new AppError(400, 'HOURS_NEED_UNLIMITED', 'An hourly type has no balance: set accrual to Unlimited and limit it per month');
 }
 
 export class LeaveRequestDto {
@@ -46,6 +73,9 @@ export class LeaveRequestDto {
   @IsYmd() to: string;
   @IsOptional() @IsIn(['FIRST', 'SECOND']) startHalf?: Half;
   @IsOptional() @IsIn(['FIRST', 'SECOND']) endHalf?: Half;
+  /** Hourly types (permission): local times on `from`, which must equal `to`. */
+  @IsOptional() @IsHm() startTime?: string;
+  @IsOptional() @IsHm() endTime?: string;
   @IsOptional() @IsString() @MaxLength(1000) reason?: string;
   /** Key from POST /v1/mobile/uploads. */
   @IsOptional() @IsString() @MaxLength(300) attachmentKey?: string;
@@ -99,6 +129,10 @@ export class RequiredNoteDto {
 // ── Service ─────────────────────────────────────────────────────────────────
 
 const round1 = (n: number) => Math.round(n * 10) / 10;
+const round2 = (n: number) => Math.round(n * 100) / 100;
+const hm = (t: string) => Number(t.slice(0, 2)) * 60 + Number(t.slice(3, 5));
+const LIVE = ['PENDING', 'APPROVED'];
+
 
 @Injectable()
 export class LeaveService {
@@ -125,7 +159,7 @@ export class LeaveService {
   }
 
   presentRequest(r: LeaveRequest & Record<string, any>) {
-    return { ...r, startDate: ymdOf(r.startDate), endDate: ymdOf(r.endDate), days: Number(r.days) };
+    return { ...r, startDate: ymdOf(r.startDate), endDate: ymdOf(r.endDate), days: Number(r.days), hours: r.minutes == null ? null : round2(r.minutes / 60) };
   }
 
   /** Days are always computed server-side through the schedule resolver (§8.2). */
@@ -147,6 +181,18 @@ export class LeaveService {
     return { balance: round1(balance), pending: round1(pend), available: round1(balance - pend) };
   }
 
+  /** A month's use of a type with a monthly cap (pending + approved), in the type's unit. null = no cap. */
+  async quota(employeeId: string, type: LeaveType, month: string) {
+    if (type.maxPerMonth === null && type.maxRequestsPerMonth === null) return null;
+    const { from, to } = monthRange(month);
+    const rows = await this.prisma.leaveRequest.findMany({
+      where: { employeeId, leaveTypeId: type.id, status: { in: LIVE }, startDate: { gte: dbDate(from), lte: dbDate(to) } },
+      select: { days: true, minutes: true },
+    });
+    const limit = type.maxPerMonth === null ? null : Number(type.maxPerMonth);
+    return { month, unit: type.unit, ...monthlyUsage(rows, type.unit === 'HOURS'), limit, maxRequests: type.maxRequestsPerMonth };
+  }
+
   private normaliseHalves(dto: { from: string; to: string; startHalf?: Half; endHalf?: Half }) {
     if (dto.to < dto.from) throw new AppError(400, 'BAD_RANGE', 'to is before from');
     if (dto.from === dto.to) return { startHalf: dto.startHalf ?? null, endHalf: dto.startHalf ?? null };
@@ -161,15 +207,28 @@ export class LeaveService {
     await this.assertHasLeave(employee);
     const type = await this.prisma.leaveType.findFirst({ where: { id: dto.leaveTypeId, tenantId: user.tenantId } });
     if (!type || !type.active) throw new AppError(400, 'LEAVE_TYPE_UNAVAILABLE', 'This leave type is not available');
-    const { startHalf, endHalf } = this.normaliseHalves(dto);
+    const hourly = type.unit === 'HOURS';
+    const { startHalf, endHalf } = hourly ? { startHalf: null, endHalf: null } : this.normaliseHalves(dto);
     if ((startHalf || endHalf) && !type.allowHalfDay) throw new AppError(400, 'NO_HALF_DAY', `${type.name} cannot be taken as half days`);
+    let minutes: number | null = null;
+    if (hourly) {
+      if (dto.from !== dto.to) throw new AppError(400, 'BAD_RANGE', `${type.name} is taken in hours on a single day`);
+      if (!dto.startTime || !dto.endTime || hm(dto.endTime) <= hm(dto.startTime)) {
+        throw new AppError(400, 'BAD_TIME_RANGE', 'Give a startTime and a later endTime (HH:mm)');
+      }
+      minutes = hm(dto.endTime) - hm(dto.startTime);
+    }
 
-    const days = await this.countDays(employee, type, dto.from, dto.to, startHalf, endHalf);
+    // Hourly leave still has to fall on a working day; it uses no days itself.
+    const days = await this.countDays(employee, hourly ? { ...type, countsOffDays: false } : type, dto.from, dto.to, startHalf, endHalf);
     const warnings: string[] = [];
     const errors: string[] = [];
     const tz = (await this.prisma.site.findUnique({ where: { id: employee.siteId } }))?.timezone ?? 'UTC';
     const today = localYmd(new Date(), tz);
     if (days.total === 0) errors.push('NO_WORKING_DAYS');
+    if (!entitlementOf(employee, type).eligible) errors.push('NOT_ELIGIBLE');
+    const eligible = eligibleFrom(employee, type);
+    if (dto.from < eligible) errors.push(`ELIGIBLE_FROM_${eligible}`);
     if (type.minNoticeDays && diffDays(today, dto.from) < type.minNoticeDays) {
       (isHrOrAdmin(user) && dto.employeeId ? warnings : errors).push(`MIN_NOTICE_${type.minNoticeDays}_DAYS`);
     }
@@ -179,27 +238,40 @@ export class LeaveService {
     if (dto.from < today) warnings.push('PAST_DATES');
 
     const balances = [];
-    for (const [year, needed] of days.byYear) {
+    // Unlimited types (LOP, permission) have no balance: only a monthly cap limits them.
+    for (const [year, needed] of type.accrualKind === 'UNLIMITED' ? [] : days.byYear) {
       const b = await this.balance(employee.id, type.id, year);
       const after = round1(b.available - needed);
       if (after < 0 && !type.allowNegative) errors.push(`INSUFFICIENT_BALANCE_${year}`);
       balances.push({ leaveYear: year, ...b, requested: needed, availableAfter: after });
     }
+    const quota = await this.quota(employee.id, type, dto.from.slice(0, 7));
+    if (quota) {
+      const asking = hourly ? minutes! / 60 : days.total;
+      if (quota.maxRequests !== null && quota.requests + 1 > quota.maxRequests) errors.push('MONTHLY_REQUESTS_EXCEEDED');
+      if (quota.limit !== null && round2(quota.used + asking) > quota.limit) errors.push('MONTHLY_LIMIT_EXCEEDED');
+    }
+    // One live request per person per day (leave_requests_no_overlap backs this up).
     const overlap = await this.prisma.leaveRequest.findFirst({
-      where: { employeeId: employee.id, status: { in: ['PENDING', 'APPROVED'] }, startDate: { lte: dbDate(dto.to) }, endDate: { gte: dbDate(dto.from) } },
+      where: { employeeId: employee.id, status: { in: LIVE }, startDate: { lte: dbDate(dto.to) }, endDate: { gte: dbDate(dto.from) } },
     });
     if (overlap) errors.push('OVERLAPS_EXISTING_REQUEST');
 
     return {
       employeeId: employee.id,
-      leaveType: { id: type.id, code: type.code, name: type.name },
+      leaveType: { id: type.id, code: type.code, name: type.name, unit: type.unit },
       from: dto.from,
       to: dto.to,
       startHalf,
       endHalf,
-      days: days.total,
-      perDay: days.perDay,
+      startTime: hourly ? dto.startTime! : null,
+      endTime: hourly ? dto.endTime! : null,
+      minutes,
+      hours: minutes === null ? null : round2(minutes / 60),
+      days: hourly ? 0 : days.total,
+      perDay: hourly ? [] : days.perDay,
       balances,
+      quota,
       warnings,
       errors,
       canSubmit: errors.length === 0,
@@ -226,6 +298,9 @@ export class LeaveService {
             endDate: dbDate(dto.to),
             startHalf: p.startHalf,
             endHalf: p.endHalf,
+            startTime: p.startTime,
+            endTime: p.endTime,
+            minutes: p.minutes,
             days: p.days,
             reason: dto.reason,
             attachmentKey: dto.attachmentKey,
@@ -260,12 +335,15 @@ export class LeaveService {
         ...(q.from ? { endDate: { gte: dbDate(q.from) } } : {}),
         ...(q.to ? { startDate: { lte: dbDate(q.to) } } : {}),
       },
-      include: { leaveType: { select: { id: true, code: true, name: true, color: true } }, employee: { select: { id: true, fullName: true, employeeCode: true } } },
+      include: { leaveType: { select: { id: true, code: true, name: true, color: true, unit: true, requiresHrApproval: true } }, employee: { select: { id: true, fullName: true, employeeCode: true } } },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
       take: limit + 1,
       ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
     });
-    const data = rows.slice(0, limit).map((r) => this.presentRequest(r));
+    const page = rows.slice(0, limit);
+    const names = await approverNames(this.prisma, page);
+    // `progress`: the approval tracker (Submitted → Manager → HR → Approved) the employee sees.
+    const data = page.map((r) => ({ ...this.presentRequest(r), progress: approvalTrack(r, r.leaveType.requiresHrApproval, names) }));
     return { data, nextCursor: rows.length > limit ? data[data.length - 1].id : null };
   }
 
@@ -287,16 +365,26 @@ export class LeaveService {
         targetId: id,
         actor: actorOf(user),
         tenantId: user.tenantId,
-        payloadFrom: () => ({ note: note ?? null }),
+        payloadFrom: () => ({ employeeId: r.employeeId, note: note ?? null }),
         run: (tx) => tx.leaveRequest.update({ where: { id }, data: { managerApproverId: user.sub, managerDecidedAt: new Date(), decisionNote: note } }),
       });
       await this.notifications.approvalPending(user.tenantId, r.employeeId, 'leave', id, r.employee.fullName, true);
+      await this.notifications.notify(r.tenantId, [r.employee.userId], {
+        type: 'LEAVE_MANAGER_APPROVED',
+        title: 'Leave approved by your manager',
+        body: `Your leave ${ymdOf(r.startDate)} – ${ymdOf(r.endDate)} is now waiting for HR`,
+        data: { id },
+      });
       return this.presentRequest(await this.prisma.leaveRequest.findUniqueOrThrow({ where: { id } }));
     }
 
     // Balance is re-checked at approval: other requests may have been approved meanwhile.
-    const counted = await this.countDays(r.employee, r.leaveType, ymdOf(r.startDate), ymdOf(r.endDate), r.startHalf as Half, r.endHalf as Half);
-    if (!r.leaveType.allowNegative) {
+    // Hourly leave never touches the ledger; its monthly cap was checked when it was filed.
+    const counted =
+      r.minutes !== null
+        ? { total: 0, byYear: new Map<number, number>() }
+        : await this.countDays(r.employee, r.leaveType, ymdOf(r.startDate), ymdOf(r.endDate), r.startHalf as Half, r.endHalf as Half);
+    if (!r.leaveType.allowNegative && r.leaveType.accrualKind !== 'UNLIMITED') {
       for (const [year, needed] of counted.byYear) {
         const b = await this.balance(r.employeeId, r.leaveTypeId, year);
         // `available` already subtracts this pending request.
@@ -310,7 +398,7 @@ export class LeaveService {
       targetId: id,
       actor: actorOf(user),
       tenantId: user.tenantId,
-      payloadFrom: () => ({ days: counted.total, note: note ?? null }),
+      payloadFrom: () => ({ employeeId: r.employeeId, leaveTypeId: r.leaveTypeId, from: ymdOf(r.startDate), to: ymdOf(r.endDate), days: counted.total, minutes: r.minutes, note: note ?? null }),
       run: async (tx) => {
         const res = await tx.leaveRequest.updateMany({
           where: { id, status: 'PENDING' },
@@ -336,13 +424,14 @@ export class LeaveService {
     if (!r) throw new AppError(404, 'NOT_FOUND', 'Leave request not found');
     if (r.status !== 'PENDING') throw new AppError(409, 'ALREADY_DECIDED', `This request is already ${r.status.toLowerCase()}`);
     await this.scope.assertApprover(user, r.employeeId);
+    if (note.trim().length < 3) throw new AppError(400, 'REASON_REQUIRED', 'Give a reason for the rejection');
     const rejected = await this.audit.run({
       action: 'LEAVE_REJECTED',
       targetType: 'LeaveRequest',
       targetId: id,
       actor: actorOf(user),
       tenantId: user.tenantId,
-      payloadFrom: () => ({ note }),
+      payloadFrom: () => ({ employeeId: r.employeeId, leaveTypeId: r.leaveTypeId, from: ymdOf(r.startDate), to: ymdOf(r.endDate), note }),
       run: (tx) => tx.leaveRequest.update({ where: { id }, data: { status: 'REJECTED', approverId: user.sub, decidedAt: new Date(), decisionNote: note } }),
     });
     await this.notifyDecision(r, 'rejected', note);
@@ -366,7 +455,7 @@ export class LeaveService {
       targetId: id,
       actor: actorOf(user),
       tenantId: user.tenantId,
-      payloadFrom: () => ({ wasApproved, note: note ?? null }),
+      payloadFrom: () => ({ employeeId: r.employeeId, leaveTypeId: r.leaveTypeId, from: ymdOf(r.startDate), to: ymdOf(r.endDate), wasApproved, note: note ?? null }),
       run: async (tx) => {
         if (wasApproved) {
           const debits = await tx.leaveLedger.findMany({ where: { requestId: id, kind: 'DEBIT' } });
@@ -406,17 +495,25 @@ export class LeaveService {
     ]);
     const sum = (typeId: string, kinds: string[], periodPrefix = '') =>
       round1(ledger.filter((l) => l.leaveTypeId === typeId && kinds.includes(l.kind) && (l.periodKey ?? '').startsWith(periodPrefix)).reduce((s, l) => s + Number(l._sum.delta ?? 0), 0));
+    const thisMonth = localYmd(new Date(), site?.timezone ?? 'UTC').slice(0, 7);
+    // Types this person is not eligible for are hidden unless they already have history in them.
+    const shown = types.filter((t) => (t.active && entitlementOf(employee, t).eligible) || ledger.some((l) => l.leaveTypeId === t.id));
     return {
       employeeId: employee.id,
       leaveYear: y,
       period: leaveYearRange(y),
-      balances: types
-        .filter((t) => t.active || ledger.some((l) => l.leaveTypeId === t.id))
-        .map((t) => {
+      balances: await Promise.all(
+        shown.map(async (t) => {
           const balance = sum(t.id, ['OPENING', 'ACCRUAL', 'DEBIT', 'REVERSAL', 'ADJUSTMENT', 'CARRY_FORWARD', 'LAPSE', 'COMP_CREDIT']);
           const pend = round1(pending.filter((p) => p.leaveTypeId === t.id && leaveYearOf(ymdOf(p.startDate)) === y).reduce((s, p) => s + Number(p.days), 0));
+          const ent = entitlementOf(employee, t);
           return {
-            leaveType: { id: t.id, code: t.code, name: t.name, color: t.color, paid: t.paid },
+            leaveType: { id: t.id, code: t.code, name: t.name, color: t.color, paid: t.paid, unit: t.unit, accrualKind: t.accrualKind },
+            /** Amount per accrual for this person, and whether it is their own override. */
+            entitlement: { amount: ent.amount, eligible: ent.eligible, overridden: ent.overridden, eligibleFrom: eligibleFrom(employee, t) },
+            /** Unlimited types have no balance: `available` is null. */
+            unlimited: t.accrualKind === 'UNLIMITED',
+            quota: await this.quota(employee.id, t, thisMonth),
             opening: sum(t.id, ['OPENING']),
             carriedForward: sum(t.id, ['CARRY_FORWARD']),
             carriedIn: sum(t.id, ['CARRY_FORWARD'], 'CF-IN:'),
@@ -427,10 +524,30 @@ export class LeaveService {
             lapsed: -sum(t.id, ['LAPSE']),
             balance,
             pending: pend,
-            available: round1(balance - pend),
+            available: t.accrualKind === 'UNLIMITED' ? null : round1(balance - pend),
           };
         }),
+      ),
     };
+  }
+
+  /** Per-person override of the blanket leave policy (HR). Applies to accruals from now on. */
+  async setEntitlement(user: AuthUser, dto: EntitlementDto) {
+    const employee = await this.scope.assertEmployee(user, dto.employeeId);
+    const type = await this.prisma.leaveType.findFirst({ where: { id: dto.leaveTypeId, tenantId: user.tenantId } });
+    if (!type) throw new AppError(404, 'NOT_FOUND', 'Leave type not found');
+    const { [type.id]: _old, ...rest } = (employee.leaveEntitlements ?? {}) as Record<string, number>;
+    const next = dto.amount === null || dto.amount === undefined ? rest : { ...rest, [type.id]: dto.amount };
+    await this.audit.run({
+      action: 'LEAVE_ENTITLEMENT_SET',
+      targetType: 'Employee',
+      targetId: employee.id,
+      actor: actorOf(user),
+      tenantId: user.tenantId,
+      payloadFrom: () => ({ employeeId: employee.id, leaveTypeId: type.id, before: _old ?? null, after: dto.amount ?? null }),
+      run: (tx) => tx.employee.update({ where: { id: employee.id }, data: { leaveEntitlements: next } }),
+    });
+    return { employeeId: employee.id, leaveTypeId: type.id, ...entitlementOf({ ...employee, leaveEntitlements: next }, type) };
   }
 
   async ledger(user: AuthUser, q: LedgerQuery) {
@@ -530,7 +647,7 @@ export class LeaveService {
       this.prisma.leaveType.findMany({ where: { tenantId, active: true } }),
       this.prisma.employee.findMany({
         where: { tenantId, status: 'ACTIVE', ...(skipInterns ? { employmentType: { not: 'INTERN' } } : {}) },
-        select: { id: true, joinedOn: true },
+        select: { id: true, joinedOn: true, employmentType: true, leaveEntitlements: true },
       }),
     ]);
     // Close last year first, so this year's max-balance cap already sees what was carried in.
@@ -539,15 +656,19 @@ export class LeaveService {
     for (let m = yearStart.slice(0, 7); `${m}-01` <= today; m = addDays(monthRange(m).to, 1).slice(0, 7)) months.push(m);
 
     const rows: Prisma.LeaveLedgerCreateManyInput[] = [];
+    const amounts = new Map<string, number>(); // employee:type → amount per accrual, for the cap note below
     for (const type of types) {
-      const amount = Number(type.accrualAmount);
-      if (type.accrualKind === 'NONE' || amount <= 0) continue;
+      if (!['MONTHLY', 'YEARLY_UPFRONT'].includes(type.accrualKind)) continue;
       for (const e of employees) {
-        const joined = ymdOf(e.joinedOn);
+        // Blanket policy by employment type, the person's own override, and probation (minServiceDays).
+        const { amount } = entitlementOf(e, type);
+        if (amount <= 0) continue;
+        amounts.set(`${e.id}:${type.id}`, amount);
+        const from = eligibleFrom(e, type);
         const periods =
           type.accrualKind === 'MONTHLY'
-            ? months.filter((m) => joined <= monthRange(m).to).map((m) => `ACCRUAL:${m}`)
-            : joined <= today
+            ? months.filter((m) => from <= monthRange(m).to).map((m) => `ACCRUAL:${m}`)
+            : from <= today
               ? [`ACCRUAL:Y${year}`]
               : [];
         for (const periodKey of periods) {
@@ -569,7 +690,7 @@ export class LeaveService {
           const { balance } = await this.balance(r.employeeId, r.leaveTypeId, year);
           const room = Number(type.maxBalance) - balance;
           r.delta = Math.max(0, Math.min(Number(r.delta), room));
-          r.note = Number(r.delta) < Number(type.accrualAmount) ? 'capped at max balance' : undefined;
+          r.note = Number(r.delta) < amounts.get(`${r.employeeId}:${r.leaveTypeId}`)! ? 'capped at max balance' : undefined;
         }
       }
       if (fresh.length) await this.prisma.leaveLedger.createMany({ data: fresh, skipDuplicates: true });
@@ -633,14 +754,20 @@ export class LeaveController {
       actor: actorOf(user),
       tenantId: user.tenantId,
       payloadFrom: () => ({ ...dto }),
-      run: (tx) => tx.leaveType.create({ data: { ...dto, tenantId: user.tenantId } }),
+      run: (tx) => tx.leaveType.create({ data: { ...this.checked(dto), tenantId: user.tenantId } }),
     });
+  }
+
+  private checked(dto: LeaveTypeDto, before?: LeaveType) {
+    assertAmounts(dto.entitlements);
+    assertUnit({ unit: dto.unit ?? before?.unit, accrualKind: dto.accrualKind ?? before?.accrualKind });
+    return dto;
   }
 
   @Patch('types/:id')
   @Roles('ADMIN', 'HR')
   async updateType(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body() dto: LeaveTypeDto) {
-    await this.prisma.leaveType.findFirstOrThrow({ where: { id, tenantId: user.tenantId } });
+    const before = await this.prisma.leaveType.findFirstOrThrow({ where: { id, tenantId: user.tenantId } });
     return this.audit.run({
       action: 'LEAVE_TYPE_UPDATED',
       targetType: 'LeaveType',
@@ -648,7 +775,7 @@ export class LeaveController {
       actor: actorOf(user),
       tenantId: user.tenantId,
       payloadFrom: () => ({ ...dto }),
-      run: (tx) => tx.leaveType.update({ where: { id }, data: dto }),
+      run: (tx) => tx.leaveType.update({ where: { id }, data: this.checked(dto, before) }),
     });
   }
 
@@ -724,6 +851,13 @@ export class LeaveController {
   @Roles('ADMIN', 'HR')
   adjust(@CurrentUser() user: AuthUser, @Body() dto: AdjustmentDto) {
     return this.leave.adjust(user, dto);
+  }
+
+  /** Override the blanket policy for one person: amount per accrual, 0 = not eligible, null = back to blanket. */
+  @Post('entitlements')
+  @Roles('ADMIN', 'HR')
+  setEntitlement(@CurrentUser() user: AuthUser, @Body() dto: EntitlementDto) {
+    return this.leave.setEntitlement(user, dto);
   }
 
   @Post('comp-off')

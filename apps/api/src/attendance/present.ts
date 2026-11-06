@@ -72,6 +72,7 @@ export function presentDay(day: AttendanceDay & { employee?: EmployeeLite | null
     leavePortion: Number(day.leavePortion),
     leaveHalf: day.leaveHalf,
     leaveTypeId: day.leaveTypeId,
+    permissionMinutes: day.permissionMinutes,
     remote: day.remote,
     corrected: day.corrected,
     segments: day.segments,

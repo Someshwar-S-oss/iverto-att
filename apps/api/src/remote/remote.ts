@@ -7,10 +7,11 @@ import { randomUUID } from 'crypto';
 import { presentPunch } from '../attendance/present';
 import { RecomputeQueue } from '../attendance/recompute.service';
 import { AuditableActionService } from '../audit/audit.service';
-import { actorOf, AuthUser, CurrentUser, Roles } from '../auth/auth.types';
+import { actorOf, AuthUser, CurrentUser, isHrOrAdmin, Roles } from '../auth/auth.types';
 import { ScopeService } from '../auth/scope.service';
 import { AzureBlobService } from '../common/azure-blob.service';
 import { AppError } from '../common/errors';
+import { approvalTrack, approverNames } from '../common/approval';
 import { PrismaService } from '../common/prisma.service';
 import { dbDate, diffDays, formatLocal, localYmd, ymdOf } from '../common/time';
 import { IsYmd } from '../common/validators';
@@ -56,6 +57,27 @@ export function decodeSelfie(base64: string): Buffer {
   return selfie;
 }
 
+/** Great-circle distance in metres. */
+export function distanceM(a: { lat: number; lng: number }, b: { lat: number; lng: number }) {
+  const rad = Math.PI / 180;
+  const h = Math.sin(((b.lat - a.lat) * rad) / 2) ** 2 + Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin(((b.lng - a.lng) * rad) / 2) ** 2;
+  return 2 * 6_371_000 * Math.asin(Math.sqrt(h));
+}
+
+/**
+ * null when the site has no geofence. A fix counts as inside only when it is
+ * within the radius and the phone did not report a mock location.
+ * ponytail: the reported GPS accuracy is not used; require accuracy ≤ radius if vague fixes slip through.
+ */
+export function geofenceCheck(
+  site: { lat: number | null; lng: number | null; geofenceRadiusM: number | null },
+  fix: { lat: number; lng: number; isMockLocation?: boolean | null },
+) {
+  if (site.lat === null || site.lng === null || !site.geofenceRadiusM) return null;
+  const d = Math.round(distanceM({ lat: site.lat, lng: site.lng }, fix));
+  return { distanceM: d, inside: d <= site.geofenceRadiusM && fix.isMockLocation !== true };
+}
+
 /** Remote work (§9): same approval path as leave, same no-overlap constraint, plus field/remote punches. */
 @Injectable()
 export class RemoteService {
@@ -73,7 +95,13 @@ export class RemoteService {
     return { ...r, startDate: ymdOf(r.startDate), endDate: ymdOf(r.endDate) };
   }
 
-  async list(user: AuthUser, q: RequestListQuery, mineOnly = false) {
+  /** Org setting: remote work needs a manager and then HR/admin to approve. */
+  async twoLevel(tenantId: string) {
+    const t = await this.prisma.tenant.findUnique({ where: { id: tenantId }, select: { settings: true } });
+    return (t?.settings as Record<string, unknown> | undefined)?.remoteRequiresHrApproval === true;
+  }
+
+  async list(user: AuthUser, q: RequestListQuery & { awaitingMe?: boolean }, mineOnly = false) {
     const limit = q.limit ?? 50;
     const employee = mineOnly
       ? { id: user.employeeId ?? '__none__' }
@@ -81,7 +109,9 @@ export class RemoteService {
     const rows = await this.prisma.remoteWorkRequest.findMany({
       where: {
         tenantId: user.tenantId,
-        status: q.status,
+        status: q.awaitingMe ? 'PENDING' : q.status,
+        // A manager's queue leaves out requests already passed on to HR.
+        ...(q.awaitingMe && user.role === 'MANAGER' ? { managerApproverId: null } : {}),
         employee,
         ...(q.from ? { endDate: { gte: dbDate(q.from) } } : {}),
         ...(q.to ? { startDate: { lte: dbDate(q.to) } } : {}),
@@ -91,7 +121,9 @@ export class RemoteService {
       take: limit + 1,
       ...(q.cursor ? { cursor: { id: q.cursor }, skip: 1 } : {}),
     });
-    const data = rows.slice(0, limit).map((r) => this.present(r));
+    const page = rows.slice(0, limit);
+    const [names, twoLevel] = await Promise.all([approverNames(this.prisma, page), this.twoLevel(user.tenantId)]);
+    const data = page.map((r) => ({ ...this.present(r), progress: approvalTrack(r, twoLevel, names) }));
     return { data, nextCursor: rows.length > limit ? data[data.length - 1].id : null };
   }
 
@@ -104,7 +136,7 @@ export class RemoteService {
       targetType: 'RemoteWorkRequest',
       actor: actorOf(user),
       tenantId: user.tenantId,
-      payloadFrom: () => ({ ...dto }),
+      payloadFrom: () => ({ employeeId: employee.id, ...dto }),
       run: (tx) =>
         tx.remoteWorkRequest.create({
           data: { tenantId: user.tenantId, employeeId: employee.id, startDate: dbDate(dto.from), endDate: dbDate(dto.to), reason: dto.reason, createdBy: user.sub },
@@ -123,7 +155,29 @@ export class RemoteService {
       if (!['PENDING', 'APPROVED'].includes(r.status)) throw new AppError(409, 'NOT_CANCELLABLE', `This request is ${r.status.toLowerCase()}`);
     } else {
       await this.scope.assertApprover(user, r.employeeId);
+      if (verdict === 'REJECTED' && (note?.trim().length ?? 0) < 3) throw new AppError(400, 'REASON_REQUIRED', 'Give a reason for the rejection');
       if (r.status !== 'PENDING') throw new AppError(409, 'ALREADY_DECIDED', `This request is already ${r.status.toLowerCase()}`);
+    }
+    // Two levels (org setting): a manager's approval passes it on to HR; HR/Admin approval is final.
+    if (verdict === 'APPROVED' && !isHrOrAdmin(user) && (await this.twoLevel(user.tenantId))) {
+      if (r.managerApproverId) throw new AppError(409, 'AWAITING_HR', 'Already approved by a manager; waiting for HR');
+      const passed = await this.audit.run({
+        action: 'REMOTE_MANAGER_APPROVED',
+        targetType: 'RemoteWorkRequest',
+        targetId: id,
+        actor: actorOf(user),
+        tenantId: user.tenantId,
+        payloadFrom: () => ({ employeeId: r.employeeId, from: ymdOf(r.startDate), to: ymdOf(r.endDate), note: note ?? null }),
+        run: (tx) => tx.remoteWorkRequest.update({ where: { id }, data: { managerApproverId: user.sub, managerDecidedAt: new Date(), decisionNote: note ?? null } }),
+      });
+      await this.notifications.approvalPending(user.tenantId, r.employeeId, 'remote', id, r.employee.fullName, true);
+      await this.notifications.notify(r.tenantId, [r.employee.userId], {
+        type: 'REMOTE_MANAGER_APPROVED',
+        title: 'Remote work approved by your manager',
+        body: `Your remote work ${ymdOf(r.startDate)} – ${ymdOf(r.endDate)} is now waiting for HR`,
+        data: { id },
+      });
+      return this.present(passed);
     }
     const wasApproved = r.status === 'APPROVED';
     const updated = await this.audit.run({
@@ -132,7 +186,7 @@ export class RemoteService {
       targetId: id,
       actor: actorOf(user),
       tenantId: user.tenantId,
-      payloadFrom: () => ({ note: note ?? null }),
+      payloadFrom: () => ({ employeeId: r.employeeId, from: ymdOf(r.startDate), to: ymdOf(r.endDate), note: note ?? null }),
       run: (tx) =>
         tx.remoteWorkRequest.update({
           where: { id },
@@ -172,6 +226,12 @@ export class RemoteService {
     if (!allowed) {
       throw new AppError(403, 'MOBILE_PUNCH_NOT_ALLOWED', employee.mobilePunch === 'NEVER' ? 'Mobile punching is not enabled for you' : 'You have no approved remote work today');
     }
+    // Geofence: inside the site's circle (and not a mock fix) approves the punch on the spot;
+    // outside waits for a manager, or is refused when the site is strict.
+    const fence = geofenceCheck(employee.site, dto);
+    if (fence && !fence.inside && employee.site.geofenceStrict) {
+      throw new AppError(403, 'OUTSIDE_GEOFENCE', `You are ${fence.distanceM} m from ${employee.site.name}; punch within ${employee.site.geofenceRadiusM} m`);
+    }
     const selfie = decodeSelfie(dto.selfieBase64);
     // Upload first so a punch never exists without its selfie; a failed insert only leaves an orphan blob.
     const photoKey = `${employee.tenantId}/${employee.id}/${today}/${randomUUID()}.jpg`;
@@ -191,7 +251,9 @@ export class RemoteService {
         reason: dto.clientTime ? `clientTime=${dto.clientTime}` : null,
         createdBy: user.sub,
         photoKey,
-        reviewStatus: 'PENDING',
+        reviewStatus: fence?.inside ? 'APPROVED' : 'PENDING',
+        ...(fence && { reviewNote: fence.inside ? `Auto-approved: ${fence.distanceM} m from ${employee.site.name}` : `Outside geofence: ${fence.distanceM} m from ${employee.site.name}` }),
+        ...(fence?.inside && { reviewedAt: new Date() }),
       },
       employee,
     );
@@ -240,7 +302,7 @@ export class RemoteService {
       targetId: id,
       actor: actorOf(user),
       tenantId: user.tenantId,
-      payloadFrom: () => ({ note: note ?? null }),
+      payloadFrom: () => ({ employeeId: p.employee.id, note: note ?? null }),
       run: (tx) =>
         tx.punch.update({
           where: { id_punchedAt: { id, punchedAt: p.punchedAt } },

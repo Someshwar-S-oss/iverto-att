@@ -1,14 +1,14 @@
 import {
-  AppearanceSettings, Badge, Button, Callout, Card, CenteredSpinner, CopyField, DataTable, DescriptionList, EmptyState, IconButton, Modal, Pagination, PasswordStrength, Select, SettingsLayout, TextField, confirmAction,
+  AppearanceSettings, Badge, Button, Callout, Card, CenteredSpinner, CopyField, DataTable, DescriptionList, EmptyState, IconButton, Modal, Pagination, PasswordStrength, PillTabs, Select, SettingsLayout, TextField, confirmAction,
 } from '@iverto-org/core-ui';
 import { Building2, ClipboardList, KeyRound, Layers, MapPin, Palette, Plus, Scale, ShieldCheck, ShieldOff, Users, FolderKanban, UserX, UserCheck } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate, useParams } from 'react-router';
 import { Crud } from '../components/Crud';
 import { clean, EmployeePicker, Fields, FormModal, Panel, Pick, useForm } from '../components/ui';
-import { changeOwnPassword, del, patch, post, useAction, useApi, useCalendars, useUsers, type Page, type UserProfile } from '../lib/api';
+import { changeOwnPassword, DEFAULT_EMPLOYMENT_TYPES, del, patch, post, useAction, useApi, useCalendars, useDepartments, useEmployeeOptions, useLeaveTypes, useProjects, useShifts, useSites, useUsers, type Page, type UserProfile } from '../lib/api';
 import { isHr, useMe } from '../lib/auth';
-import { actionTone, auditFields, humanize } from '../lib/audit';
+import { ACTION_OPTIONS, actionLabel, actionTone, auditSentence, pageOf, readableFields, SUPPORT_ACCESS, type AuditEntry, type NameOf } from '../lib/audit';
 import { dateTime, REQUEST_STATUS, ROLE_LABEL, ROLES, StatusBadge } from '../lib/format';
 
 export function Settings() {
@@ -52,6 +52,13 @@ export function Settings() {
 
 interface Org { id: string; name: string; slug: string; settings: Record<string, any> }
 
+/** "PERMANENT = Permanent" per line; a bare label gets a code made from it. */
+const parseCategories = (text: string) =>
+  text.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
+    const [a, b] = l.includes('=') ? l.split('=').map((x) => x.trim()) : [l, l];
+    return { code: a.toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 20), label: b };
+  });
+
 function Organisation() {
   const { data } = useApi<Org>('/org');
   if (!data) return <CenteredSpinner />;
@@ -61,14 +68,15 @@ function Organisation() {
 function OrgForm({ org }: { org: Org }) {
   const s = org.settings ?? {};
   const [f, , setF] = useForm<Record<string, any>>({
-    name: org.name, dayBoundary: s.dayBoundary ?? '04:00', defaultWeeklyOffs: s.defaultWeeklyOffs ?? [0], storePunchPhotos: Boolean(s.storePunchPhotos), leaveCountsAgainstAttendance: Boolean(s.leaveCountsAgainstAttendance), internsEnabled: Boolean(s.internsEnabled),
+    name: org.name, dayBoundary: s.dayBoundary ?? '04:00', defaultWeeklyOffs: s.defaultWeeklyOffs ?? [0], storePunchPhotos: Boolean(s.storePunchPhotos), leaveCountsAgainstAttendance: Boolean(s.leaveCountsAgainstAttendance), internsEnabled: Boolean(s.internsEnabled), remoteRequiresHrApproval: Boolean(s.remoteRequiresHrApproval),
     punchPhotoRetentionDays: s.punchPhotoRetentionDays ?? 90, reportRetentionDays: s.reportRetentionDays ?? 90,
+    employmentTypes: ((s.employmentTypes?.length ? s.employmentTypes : DEFAULT_EMPLOYMENT_TYPES) as { code: string; label: string }[]).map((t) => `${t.code} = ${t.label}`).join('\n'),
     displayName: s.branding?.displayName ?? '', logoUrl: s.branding?.logoUrl ?? '', primaryColor: s.branding?.primaryColor ?? null,
   });
   const set = (k: string) => (v: unknown) => setF((x) => ({ ...x, [k]: v }));
   const save = useAction(() => {
-    const { displayName, logoUrl, primaryColor, ...rest } = f;
-    return patch('/org', { ...rest, branding: clean({ displayName, logoUrl, primaryColor: primaryColor ?? undefined }) });
+    const { displayName, logoUrl, primaryColor, employmentTypes, ...rest } = f;
+    return patch('/org', { ...rest, employmentTypes: parseCategories(employmentTypes), branding: clean({ displayName, logoUrl, primaryColor: primaryColor ?? undefined }) });
   }, { invalidate: ['/org'], success: 'Organisation settings saved' });
   return (
     <Card>
@@ -82,6 +90,9 @@ function OrgForm({ org }: { org: Org }) {
           { key: 'reportRetentionDays', label: 'Report file retention (days)', type: 'number' },
           { key: 'leaveCountsAgainstAttendance', label: 'Approved leave lowers attendance score', type: 'bool', hint: 'Leaderboard. Off: approved leave days are left out; unapproved absences always count.' },
           { key: 'internsEnabled', label: 'Interns', type: 'bool', hint: 'Adds an Interns view under Employees. Employees with employment type “Intern” get no leave — no leave types, balances or accruals — since they are outside payroll.' },
+          { key: 'remoteRequiresHrApproval', label: 'Remote work: two-level approval', type: 'bool', hint: 'The manager approves, then HR / admin. Off = the manager’s approval is final. Leave sets this per leave type.' },
+          { key: 'employmentTypes', label: 'Employee categories', type: 'textarea',
+            hint: 'One per line as CODE = Label, e.g. PERMANENT = Permanent. Each leave type can give each category its own entitlement (Leave → Leave types).' },
           { key: 'displayName', label: 'Display name', hint: 'Shown beside the logo in the web and mobile apps, and in report headers' },
           { key: 'logoUrl', label: 'Logo URL (https)', hint: 'Replaces the Iverto logo in the web app, mobile app and reports. Square images look best.' },
           { key: 'primaryColor', label: 'Report accent colour', type: 'color' },
@@ -96,15 +107,26 @@ function Sites() {
   const calendars = useCalendars().data ?? [];
   return (
     <Crud embedded title="Sites" subtitle="Each site has its own timezone and holiday calendar." path="/sites" noun="site"
-      blank={{ name: '', address: '', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, holidayCalendarId: '' }}
-      toForm={(s: any) => ({ ...s, address: s.address ?? '', holidayCalendarId: s.holidayCalendarId ?? '' })}
-      toBody={(f) => ({ ...clean(f), holidayCalendarId: f.holidayCalendarId || null })}
-      columns={[{ key: 'name', header: 'Site' }, { key: 'timezone', header: 'Timezone' }, { key: 'cal', header: 'Holidays', render: (s: any) => calendars.find((c) => c.id === s.holidayCalendarId)?.name ?? '—' }]}
+      blank={{ name: '', address: '', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, holidayCalendarId: '', lat: '', lng: '', geofenceRadiusM: '', geofenceStrict: false }}
+      toForm={(s: any) => ({ ...s, address: s.address ?? '', holidayCalendarId: s.holidayCalendarId ?? '', lat: s.lat ?? '', lng: s.lng ?? '', geofenceRadiusM: s.geofenceRadiusM ?? '' })}
+      toBody={(f) => {
+        const n = (v: unknown) => (v === '' || v === null || v === undefined ? null : Number(v));
+        return { ...clean(f), holidayCalendarId: f.holidayCalendarId || null, lat: n(f.lat), lng: n(f.lng), geofenceRadiusM: n(f.geofenceRadiusM) };
+      }}
+      columns={[
+        { key: 'name', header: 'Site' }, { key: 'timezone', header: 'Timezone' },
+        { key: 'cal', header: 'Holidays', render: (s: any) => calendars.find((c) => c.id === s.holidayCalendarId)?.name ?? '—' },
+        { key: 'geo', header: 'Geofence', render: (s: any) => (s.geofenceRadiusM ? `${s.geofenceRadiusM} m${s.geofenceStrict ? ' · strict' : ''}` : '—') },
+      ]}
       fields={[
         { key: 'name', label: 'Name', required: true },
         { key: 'address', label: 'Address' },
         { key: 'timezone', label: 'Timezone (IANA)', required: true, placeholder: 'Asia/Kolkata' },
         { key: 'holidayCalendarId', label: 'Holiday calendar', type: 'select', placeholder: 'No holidays — search calendars', hint: 'The holiday list this location follows', options: calendars.map((c) => ({ value: c.id, label: c.name })) },
+        { key: 'lat', label: 'Latitude', type: 'number', placeholder: '13.0827', hint: 'Geofence centre. In Google Maps, right-click the office → copy the coordinates' },
+        { key: 'lng', label: 'Longitude', type: 'number', placeholder: '80.2707' },
+        { key: 'geofenceRadiusM', label: 'Geofence radius (m)', type: 'number', placeholder: '150', hint: 'Mobile punches inside are approved automatically; outside go to a manager. Empty = no geofence' },
+        { key: 'geofenceStrict', label: 'Refuse punches outside the geofence', type: 'bool', when: (f) => Boolean(f.geofenceRadiusM) },
       ]} />
   );
 }
@@ -133,7 +155,7 @@ function Policies() {
     <Crud embedded title="Attendance policies" subtitle="Changes apply from today; past days keep the policy they were judged with." path="/attendance-policies" noun="policy"
       blank={{ name: '', isDefault: false, graceInMinutes: 10, graceOutMinutes: 10, halfDayMinPercent: 50, fullDayMinPercent: 90, earlyWindowMinutes: 180, lateWindowMinutes: 360,
         duplicatePunchSeconds: 60, minSessionMinutes: 5, absentAfterMinutes: 120, missedOutCredit: 'NONE', overtimeEnabled: false, overtimeMinMinutes: 30, breakDeduction: 'SHIFT_BREAK',
-        roundingMinutes: 0, minRestHours: 8, maxWeeklyHours: 60, lateDeduction: 'NONE', lateDeductionEvery: 2 }}
+        roundingMinutes: 0, minRestHours: 8, maxWeeklyHours: 60, lateDeduction: 'NONE', lateDeductionEvery: 2, earlyExitCountsAsLate: false, absenceDeduction: 1, pairing: 'FIRST_LAST' }}
       columns={[
         { key: 'name', header: 'Policy', render: (p: any) => <span className="font-semibold text-fg">{p.name} {p.isDefault && <Badge tone="brand">Default</Badge>}</span> },
         { key: 'grace', header: 'Grace in/out', render: (p: any) => `${p.graceInMinutes} / ${p.graceOutMinutes} min` },
@@ -160,6 +182,11 @@ function Policies() {
         { key: 'lateDeduction', label: 'Late penalty', type: 'select', hint: 'Deducted from monthly attendance (muster roll, leaderboard)',
           options: [{ value: 'NONE', label: 'Off' }, { value: 'HALF_DAY', label: 'Deduct half a day' }, { value: 'FULL_DAY', label: 'Deduct a full day' }] },
         { ...n('lateDeductionEvery', 'For every … late days in a month', 'e.g. half a day for every 2 → 4 late days cost a full day'), when: (f) => f.lateDeduction !== 'NONE' },
+        { key: 'earlyExitCountsAsLate', label: 'Early exits count as late days', type: 'bool', when: (f) => f.lateDeduction !== 'NONE',
+          hint: 'Leaving early without approved permission. With half a day for every 1, this is “unauthorised permission costs half a day”' },
+        n('absenceDeduction', 'Days deducted per absent day', 'Absent without approved leave. 1 = just the day; 1.5 = the day plus a half-day penalty (muster roll)'),
+        { key: 'pairing', label: 'Punches on in/out (bidirectional) terminals', type: 'select', hint: 'Directional punches (IN/OUT gates, the mobile app) always allow several sessions a day',
+          options: [{ value: 'FIRST_LAST', label: 'First in, last out (one session)' }, { value: 'ALTERNATE', label: 'Alternate in / out (several sessions a day)' }] },
         n('roundingMinutes', 'Round worked time down to (min)'),
         n('minRestHours', 'Minimum rest between shifts (h)', 'Roster warning only'),
         n('maxWeeklyHours', 'Maximum weekly hours', 'Roster warning only'),
@@ -240,68 +267,141 @@ function ChangePassword() {
   );
 }
 
-interface AuditRow { id: string; action: string; actorUserId: string | null; actorType: string; targetType: string | null; targetId: string | null; payload: unknown; createdAt: string }
+interface AuditRow extends AuditEntry { id: string }
+
+/** One table row: a single entry, or a run of Iverto support page views folded together. */
+interface AuditLine { id: string; first: AuditRow; rows: AuditRow[] }
+
+const VIEWS = [
+  { value: 'changes', label: 'Changes' },
+  { value: 'support', label: 'Iverto support access' },
+  { value: 'all', label: 'Everything' },
+];
+
+/** Support views by the same person less than 15 minutes apart read as one visit. */
+function foldSupportViews(rows: AuditRow[]): AuditLine[] {
+  const lines: AuditLine[] = [];
+  for (const r of rows) {
+    const last = lines[lines.length - 1];
+    const view = r.action === SUPPORT_ACCESS && (r.payload as { method?: string } | null)?.method === 'GET';
+    const prev = last?.rows[last.rows.length - 1];
+    if (view && last?.first.action === SUPPORT_ACCESS && prev && prev.actorUserId === r.actorUserId
+      && (last.first.payload as { method?: string } | null)?.method === 'GET'
+      && Math.abs(Date.parse(prev.createdAt) - Date.parse(r.createdAt)) < 15 * 60_000) {
+      last.rows.push(r);
+    } else lines.push({ id: r.id, first: r, rows: [r] });
+  }
+  return lines;
+}
 
 function Audit() {
   const [page, setPage] = useState(1);
+  const [view, setView] = useState('changes');
   const [action, setAction] = useState('');
-  const [open, setOpen] = useState<AuditRow | null>(null);
+  const [open, setOpen] = useState<AuditLine | null>(null);
   const size = 50;
-  const { data, isLoading } = useApi<Page<AuditRow>>('/audit-logs', { action, page, size });
+  const query = view === 'support' ? { action: SUPPORT_ACCESS } : { ...(action ? { action } : {}), ...(view === 'changes' ? { excludeAction: SUPPORT_ACCESS } : {}) };
+  const { data, isLoading } = useApi<Page<AuditRow>>('/audit-logs', { ...query, page, size });
+  const nameOf = useAuditNames();
   const users = useUsers().data ?? [];
-  const who = (id: string | null, type: string) => users.find((u) => u.userId === id)?.displayName ?? (type === 'user' ? `User ${id?.slice(0, 8) ?? ''}` : humanize(type));
-  const on = (r: AuditRow) => (r.targetType ? `${humanize(r.targetType)}${r.targetId ? ` · ${r.targetId.slice(0, 8)}` : ''}` : '—');
-  const fields = open ? auditFields(open.payload) : [];
+  const lines = foldSupportViews(data?.items ?? []);
+  // Platform admins are not in this organisation's user list; anyone seen opening pages through support access is one.
+  const support = new Set((data?.items ?? []).filter((r) => r.action === SUPPORT_ACCESS).map((r) => r.actorUserId));
+  const who = (r: AuditRow) =>
+    r.actorType === 'system' ? 'The system (automatic)'
+      : r.actorType === 'device' ? 'An attendance terminal'
+        : users.find((u) => u.userId === r.actorUserId)?.displayName ?? (support.has(r.actorUserId) ? 'Iverto support' : 'A former user');
+  const sentence = (l: AuditLine) => {
+    if (l.rows.length > 1) {
+      const pages = [...new Set(l.rows.map((r) => pageOf((r.payload as { url?: string }).url)))];
+      return `viewed ${pages.slice(0, 4).join(', ')}${pages.length > 4 ? ` and ${pages.length - 4} more` : ''}`;
+    }
+    return auditSentence(l.first, nameOf);
+  };
+  const note = (r: AuditRow) => {
+    const p = (r.payload ?? {}) as Record<string, unknown>;
+    const text = p.note ?? p.reason ?? p.decisionNote;
+    return typeof text === 'string' && text ? `“${text}”` : '';
+  };
+  const fields = open ? readableFields(open.first.payload, nameOf) : [];
   return (
     <div className="space-y-4">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div><h2 className="text-lg font-bold text-fg">Audit log</h2><p className="text-sm text-fg-muted">Append-only: every approval, correction, export and role change. Click an entry for its details.</p></div>
-        <TextField label="Action" hideLabel placeholder="Filter by action, e.g. LEAVE_APPROVED" value={action} onChange={(e) => { setAction(e.target.value.toUpperCase().replaceAll(' ', '_')); setPage(1); }} containerClassName="w-full sm:w-72" />
+      <div className="space-y-3">
+        <div>
+          <h2 className="text-lg font-bold text-fg">Audit log</h2>
+          <p className="text-sm text-fg-muted">A permanent record of who did what: approvals, corrections, settings changes, exports and sign-in changes. Click an entry for details.</p>
+        </div>
+        <div className="flex flex-wrap items-end justify-between gap-3">
+          <PillTabs label="Show" value={view} onChange={(v) => { setView(v); setAction(''); setPage(1); }} tabs={VIEWS} />
+          {view !== 'support' && (
+            <div className="w-full sm:w-72">
+              <Pick label="Kind of activity" placeholder="Any activity" options={ACTION_OPTIONS.filter((o) => o.value !== SUPPORT_ACCESS)} value={action} onChange={(v) => { setAction(v); setPage(1); }} />
+            </div>
+          )}
+        </div>
+        {view === 'support' && (
+          <Callout tone="info" title="What is this?">Pages Iverto’s support team opened in your organisation while helping you — for example while you reported a problem. Each visit is recorded here so you can always see it.</Callout>
+        )}
       </div>
       <Panel>
-        <DataTable rows={data?.items ?? []} getRowKey={(r) => r.id} loading={isLoading} onRowClick={setOpen} empty={<EmptyState icon={ShieldCheck} title="No audit entries match" />}
+        <DataTable rows={lines} getRowKey={(l) => l.id} loading={isLoading} onRowClick={setOpen} empty={<EmptyState icon={ShieldCheck} title="Nothing recorded here yet" />}
           columns={[
-            { key: 't', header: 'When', render: (r) => <span className="whitespace-nowrap">{dateTime(r.createdAt)}</span> },
-            { key: 'a', header: 'Action', render: (r) => <Badge tone={actionTone(r.action)}>{humanize(r.action)}</Badge> },
-            { key: 'w', header: 'Who', render: (r) => who(r.actorUserId, r.actorType) },
-            { key: 'o', header: 'On', render: (r) => <span className="text-fg-muted">{on(r)}</span> },
-            { key: 'p', header: 'Detail', render: (r) => {
-              const f = auditFields(r.payload);
-              if (!f.length) return <span className="text-fg-subtle">—</span>;
-              return (
-                <span className="line-clamp-2 text-xs text-fg-muted">
-                  {f.slice(0, 3).map((x, i) => <span key={x.term}>{i > 0 && ' · '}<span className="font-semibold text-fg-secondary">{x.term}:</span> {x.value}</span>)}
-                  {f.length > 3 && <span className="text-fg-subtle"> · +{f.length - 3} more</span>}
-                </span>
-              );
-            } },
+            { key: 't', header: 'When', render: (l) => <span className="whitespace-nowrap text-fg-muted">{dateTime(l.first.createdAt)}</span> },
+            { key: 'a', header: 'What happened', render: (l) => (
+              <div className="space-y-1">
+                <Badge tone={actionTone(l.first.action)}>{l.rows.length > 1 ? `Iverto support visit · ${l.rows.length} pages` : actionLabel(l.first.action)}</Badge>
+                <div className="text-sm text-fg"><span className="font-semibold">{who(l.first)}</span> {sentence(l)}</div>
+              </div>
+            ) },
+            { key: 'n', header: 'Note', render: (l) => <span className="line-clamp-2 text-xs text-fg-muted">{note(l.first)}</span> },
           ]} />
       </Panel>
       {data && data.total > size && <Pagination page={page} pageCount={Math.ceil(data.total / size)} onPageChange={setPage} total={data.total} pageSize={size} noun="entries" />}
       {open && (
-        <Modal open onClose={() => setOpen(null)} size="lg" title={humanize(open.action)} description={`${dateTime(open.createdAt)} · ${who(open.actorUserId, open.actorType)}`}>
+        <Modal open onClose={() => setOpen(null)} size="lg" title={open.rows.length > 1 ? 'Iverto support visit' : actionLabel(open.first.action)}
+          description={dateTime(open.first.createdAt) ?? undefined}>
           <div className="space-y-5">
-            <DescriptionList columns={2} items={[
-              { term: 'Action', value: <Badge tone={actionTone(open.action)}>{open.action}</Badge> },
-              { term: 'By', value: who(open.actorUserId, open.actorType) },
-              { term: 'On', value: open.targetType ? humanize(open.targetType) : '—' },
-              { term: 'Record ID', value: open.targetId ? <span className="font-mono text-xs break-all">{open.targetId}</span> : '—' },
-            ]} />
-            {fields.length > 0 && (
+            <p className="text-base text-fg"><span className="font-semibold">{who(open.first)}</span> {sentence(open)}.</p>
+            {open.rows.length > 1 ? (
+              <DescriptionList columns={1} items={[...open.rows].reverse().map((r) => ({ term: dateTime(r.createdAt) ?? '', value: pageOf((r.payload as { url?: string }).url) }))} />
+            ) : fields.length > 0 && (
               <div>
                 <h3 className="mb-2 text-sm font-semibold text-fg">Details</h3>
                 <DescriptionList columns={2} items={fields.map((f) => ({ term: f.term, value: <span className="break-words">{f.value}</span>, wide: f.value.length > 40 }))} />
               </div>
             )}
-            {open.payload != null && (
-              <details className="rounded-xl border border-line">
-                <summary className="cursor-pointer px-3 py-2 text-xs font-semibold text-fg-muted">Raw payload</summary>
-                <pre className="max-h-72 overflow-auto border-t border-line px-3 py-2 font-mono text-xs text-fg-secondary">{JSON.stringify(open.payload, null, 2)}</pre>
-              </details>
-            )}
+            <details className="rounded-xl border border-line">
+              <summary className="cursor-pointer px-3 py-2 text-xs font-semibold text-fg-muted">Technical details (for support)</summary>
+              <div className="space-y-2 border-t border-line px-3 py-2 text-xs text-fg-secondary">
+                <div>Action code: <span className="font-mono">{open.first.action}</span>{open.first.targetType && <> · Record: <span className="font-mono">{open.first.targetType} {open.first.targetId}</span></>}</div>
+                <div>User id: <span className="font-mono">{open.first.actorUserId ?? open.first.actorType}</span></div>
+                <pre className="max-h-72 overflow-auto font-mono">{JSON.stringify(open.rows.length > 1 ? open.rows.map((r) => r.payload) : open.first.payload, null, 2)}</pre>
+              </div>
+            </details>
           </div>
         </Modal>
       )}
     </div>
   );
+}
+
+/** Names for the ids audit entries carry (employees, leave types, locations, …), from lists the app already loads. */
+function useAuditNames(): NameOf {
+  const employees = useEmployeeOptions().data?.items ?? [];
+  const users = useUsers().data ?? [];
+  const lists: Record<string, { id: string; name: string }[]> = {
+    employee: employees.map((e) => ({ id: e.id, name: e.fullName })),
+    leaveType: (useLeaveTypes().data ?? []).map((t) => ({ id: t.id, name: t.name })),
+    site: (useSites().data ?? []).map((s) => ({ id: s.id, name: s.name })),
+    department: (useDepartments().data ?? []).map((d) => ({ id: d.id, name: d.name })),
+    shift: (useShifts().data ?? []).map((s) => ({ id: s.id, name: s.name })),
+    project: (useProjects().data ?? []).map((p) => ({ id: p.id, name: p.name })),
+    calendar: (useCalendars().data ?? []).map((c) => ({ id: c.id, name: c.name })),
+    user: users.map((u) => ({ id: u.userId, name: u.displayName })),
+  };
+  const KIND: Record<string, string> = {
+    employeeId: 'employee', managerId: 'employee', headEmployeeId: 'employee', leaveTypeId: 'leaveType', siteId: 'site', departmentId: 'department',
+    shiftId: 'shift', projectId: 'project', calendarId: 'calendar', holidayCalendarId: 'calendar', userId: 'user', approverId: 'user',
+  };
+  return (key, id) => lists[KIND[key] ?? '']?.find((x) => x.id === id)?.name;
 }

@@ -165,7 +165,7 @@ export class AttendanceController {
       workDate: { gte: dbDate(from), lte: dbDate(to) },
       employee: await scopedEmployees(this.scope, user, q, from, to),
     };
-    const [byEmployeeStatus, sums, lates, byDay, employees, policies] = await Promise.all([
+    const [byEmployeeStatus, sums, lates, latesOrEarly, byDay, employees, policies] = await Promise.all([
       this.prisma.attendanceDay.groupBy({ by: ['employeeId', 'status'], where, _count: { _all: true } }),
       this.prisma.attendanceDay.groupBy({
         by: ['employeeId'],
@@ -173,6 +173,8 @@ export class AttendanceController {
         _sum: { workedMinutes: true, overtimeMinutes: true, lateMinutes: true, earlyExitMinutes: true },
       }),
       this.prisma.attendanceDay.groupBy({ by: ['employeeId'], where: { ...where, isLate: true }, _count: { _all: true } }),
+      // For policies whose late penalty also counts early exits.
+      this.prisma.attendanceDay.groupBy({ by: ['employeeId'], where: { ...where, OR: [{ isLate: true }, { isEarlyExit: true }] }, _count: { _all: true } }),
       this.prisma.attendanceDay.groupBy({ by: ['workDate', 'status'], where, _count: { _all: true } }),
       this.prisma.employee.findMany({
         where: { AND: [where.employee as Prisma.EmployeeWhereInput, { days: { some: { workDate: { gte: dbDate(from), lte: dbDate(to) } } } }] },
@@ -188,11 +190,13 @@ export class AttendanceController {
       for (const r of byEmployeeStatus) if (r.employeeId === e.id) counts[r.status] = r._count._all;
       const s = sums.find((x) => x.employeeId === e.id)?._sum;
       const lateDays = lates.find((x) => x.employeeId === e.id)?._count._all ?? 0;
+      const policy = policies.find((x) => x.employeeId === e.id)?.policy as Record<string, unknown> | undefined;
+      const penalised = policy?.earlyExitCountsAsLate === true ? (latesOrEarly.find((x) => x.employeeId === e.id)?._count._all ?? 0) : lateDays;
       return {
         employee: e,
         counts,
         lateDays,
-        lateDeductionDays: lateDeductionDays(lateDays, policies.find((x) => x.employeeId === e.id)?.policy as Record<string, unknown>),
+        lateDeductionDays: lateDeductionDays(penalised, policy),
         workedMinutes: s?.workedMinutes ?? 0,
         overtimeMinutes: s?.overtimeMinutes ?? 0,
         lateMinutes: s?.lateMinutes ?? 0,

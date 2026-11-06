@@ -228,7 +228,9 @@ try {
   await call(admin, 'POST', '/leave/adjustments', { employeeId: emp.id, leaveTypeId: cl.id, year: 2026, delta: 5, kind: 'OPENING', note: 'opening balance' });
   r = await call(employee, 'GET', '/leave/balances');
   ok(r.body.balances.find((b) => b.leaveType.code === 'CL')?.balance === 5, 'balance from ledger', r.body);
-  const lf = '2026-10-19', lt = '2026-10-20';
+  // A future Monday–Tuesday (a hard-coded date goes stale and the employee may no longer cancel it).
+  const monday = (() => { const d = new Date(`${today()}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + 14 + ((8 - d.getUTCDay()) % 7)); return d; })();
+  const lf = monday.toISOString().slice(0, 10), lt = new Date(monday.getTime() + 86400000).toISOString().slice(0, 10);
   r = await call(employee, 'POST', '/mobile/leave/requests/preview', { leaveTypeId: cl.id, from: lf, to: lt });
   ok(r.status === 201 && r.body.days === 2 && r.body.canSubmit, 'leave preview: 2 working days', r.body);
   r = await call(employee, 'POST', '/mobile/leave/requests', { leaveTypeId: cl.id, from: lf, to: lt, reason: 'family' }, { 'idempotency-key': 'k-1' });

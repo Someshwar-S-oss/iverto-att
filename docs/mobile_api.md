@@ -111,7 +111,7 @@ GET /v1/mobile/me
 The web app requires an authenticator-app code at every sign-in. The mobile app does **not**: every `/v1/mobile/*` route, plus `GET /v1/org`, `GET /v1/departments` and `GET /v1/attendance/overview` (leaderboard, §10.6), accept a password-only session. Any other `/v1` route returns `403 MFA_REQUIRED` to a mobile token, so don't call web routes beyond those.
 
 #### Forgot password
-The sign-in screen's "Forgot password?" calls `POST /v1/auth/forgot-password` with `{ "email": "…" }` (no `Authorization` header). It always answers `200 { "ok": true }`, whether or not the account exists, so show "If an account exists, we've e-mailed a link". The e-mailed link opens the web app's reset page; the new password then works in the mobile app too. A reset signs the user out on every device.
+The sign-in screen's "Forgot password?" calls `POST /v1/auth/forgot-password` with `{ "email": "…" }` (no `Authorization` header). It always answers `201 { "ok": true }`, whether or not the account exists, so show "If an account exists, we've e-mailed a link". The e-mailed link opens the web app's reset page; the new password then works in the mobile app too. A reset signs the user out on every device.
 
 #### Organisation branding
 Show the org's own logo and name in the app header and drawer instead of the Iverto logo, with a small "Powered by iverto.ai" line at the bottom of the drawer or settings screen. Admins set both under **Settings → Organisation** on the web; reports use the same values.
@@ -999,7 +999,7 @@ Header: Idempotency-Key: <unique-uuid>
 POST /v1/mobile/approvals/:type/:id/reject
 Header: Idempotency-Key: <unique-uuid>
 ```
-Rejects application with a mandatory note explaining the rationale.
+Rejects application with a mandatory note explaining the rationale (at least 3 characters; otherwise `400 REASON_REQUIRED`). Any level can reject; see §11.3.
 
 #### Request Body
 ```json
@@ -1088,3 +1088,68 @@ Let `c = counts` (missing key = 0). Sum these over one employee, or over every e
 **Sort order**: highest `attendancePct` first. Ties go to the lower `latePct`. A `null` attendance ranks last. Rank is the 1-based position after sorting.
 
 Reference implementation: `apps/web/src/lib/leaderboard.ts` (`score`, `byRank`).
+
+
+---
+
+## 11. Leave Policy Engine, Permission, Approval Tracker & Geofence (Nov 2026)
+
+Every organisation configures its own leave policy on the web; the app only reads what the API returns. Nothing below is tenant-specific in the app.
+
+### 11.1 What the app sees
+
+- `GET /v1/mobile/me` → `employee.employmentType` (the organisation's own category code, e.g. `PERMANENT`, `TEMPORARY`, `INTERN`) and `employee.site.geofence` (`{ lat, lng, radiusM, strict }` or `null`).
+- `GET /v1/mobile/leave/types` lists **only the types this person is eligible for** (their category may be excluded, or a person-level override may exclude them). New fields per type:
+  - `unit`: `DAYS` or `HOURS`. `HOURS` types (e.g. *Permission*) are taken as a time range on one day.
+  - `available`: `null` for unlimited types (Loss of Pay, Permission) — they have no balance; don't show "0 left".
+  - `eligibleFrom`: first date the person may apply (joining date + minimum service / probation).
+  - `quota`: `null`, or this month's usage `{ month, unit, used, requests, limit, maxRequests }` — e.g. `{ used: 2.5, requests: 2, limit: 4, maxRequests: 3, unit: "HOURS" }` means 2.5 of 4 hours used, in 2 of 3 allowed requests.
+- `GET /v1/mobile/leave/balances` rows add `entitlement { amount, eligible, overridden, eligibleFrom }`, `unlimited`, `quota`, and `leaveType.unit`.
+
+### 11.2 Applying for hourly leave (Permission)
+
+For a `unit: "HOURS"` type, send one date and local times (`HH:mm`, the employee's site timezone). No halves.
+
+```json
+POST /v1/mobile/leave/requests/preview   (then POST /v1/mobile/leave/requests with the same body)
+{ "leaveTypeId": "…", "from": "2026-12-02", "to": "2026-12-02", "startTime": "09:00", "endTime": "10:30", "reason": "Bank work" }
+```
+
+Preview/response add `startTime`, `endTime`, `minutes`, `hours` (`days` is `0`) and `quota`. New preview error codes:
+
+| Code | Show |
+|---|---|
+| `MONTHLY_LIMIT_EXCEEDED` | Goes over this month's limit (e.g. 4 hours) |
+| `MONTHLY_REQUESTS_EXCEEDED` | No requests of this type left this month (e.g. 3) |
+| `NOT_ELIGIBLE` | Not available for your category |
+| `ELIGIBLE_FROM_YYYY-MM-DD` | Not eligible until that date (minimum service) |
+
+`400 BAD_RANGE` (from ≠ to) and `400 BAD_TIME_RANGE` (missing/out-of-order times) are thrown before the preview. Only one leave/permission request per person per day. An approved permission counts towards the day's hours and excuses lateness/early exit it covers (`permissionMinutes` on attendance days).
+
+### 11.3 Approval tracker (one or two levels)
+
+Leave types (per type) and remote work (per organisation) can need **manager, then HR/admin**. Every item in `GET /v1/mobile/leave/requests` and `GET /v1/mobile/remote-work` now carries `progress` — render it as an order-tracking stepper:
+
+```json
+"progress": {
+  "levels": 2,
+  "stage": "HR",                       // MANAGER | HR | APPROVED | REJECTED | CANCELLED
+  "steps": [
+    { "key": "SUBMITTED", "label": "Submitted",          "state": "done",     "at": "2026-11-05T05:10:00Z", "by": "Pooja", "note": null },
+    { "key": "MANAGER",   "label": "Manager approval",   "state": "done",     "at": "2026-11-05T06:00:00Z", "by": "Manoj", "note": null },
+    { "key": "HR",        "label": "HR / admin approval","state": "current",  "at": null, "by": null, "note": null },
+    { "key": "APPROVED",  "label": "Approved",           "state": "upcoming", "at": null, "by": null, "note": null }
+  ]
+}
+```
+
+`state` is `done | current | upcoming | rejected | cancelled | skipped` (`skipped`: HR approved directly, no manager step needed). A rejection stops at its step with the reason in `note`; the last step's label becomes `Rejected` / `Cancelled`. The request `status` stays `PENDING` until the final level approves.
+
+Approvers: in two-level flows a manager's approve returns `status: "PENDING"` (passed to HR) and the item leaves the manager's `GET /v1/mobile/approvals` queue (for both `leave` and `remote`). A second manager approve → `409 AWAITING_HR`. New notification types: `LEAVE_MANAGER_APPROVED`, `REMOTE_MANAGER_APPROVED` (to the employee).
+
+**Rejecting always needs a reason** (any level): `POST /v1/mobile/approvals/:type/:id/reject` without a `note` of at least 3 characters → `400 REASON_REQUIRED`. Make the reason field mandatory in the reject dialog.
+
+### 11.4 Mobile punch: geofence and several sessions a day
+
+- If the employee's site has a geofence, `POST /v1/mobile/punches` inside the radius (and `isMockLocation` not `true`) comes back `reviewStatus: "APPROVED"` with `reviewNote: "Auto-approved: 14 m from <site>"`. Outside it is `PENDING` (`reviewNote: "Outside geofence: 850 m from <site>"`) for a manager — or, on a **strict** site, refused with `403 OUTSIDE_GEOFENCE` (message says how far away they are). Show the distance hint before punching using `mobilePunch.geofence` from `GET /v1/mobile/today`.
+- Any number of in/out sessions per day are counted. `GET /v1/mobile/today` → `mobilePunch.nextDirection` (`in` | `out`) is the opposite of the last counted punch: drive the punch button from it instead of assuming one in and one out per day.

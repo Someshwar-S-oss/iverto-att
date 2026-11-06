@@ -8,7 +8,7 @@ import { useNavigate, useParams, useSearchParams } from 'react-router';
 import { DayDrawer } from '../components/DayDrawer';
 import { ImportEmployees } from '../components/ImportEmployees';
 import { clean, DepartmentSelect, EmployeePicker, Fields, FormModal, Panel, Pick, SiteSelect, useForm, type FieldSpec } from '../components/ui';
-import { patch, post, REFERENCE, useAction, useApi, useDepartments, useShifts, useSites, type Page } from '../lib/api';
+import { patch, post, REFERENCE, useAction, useApi, useDepartments, useEmploymentTypes, useShifts, useSites, type Page } from '../lib/api';
 import { isHr, useMe } from '../lib/auth';
 import { addDays, hm, REQUEST_STATUS, ROLE_LABEL, ROLES, StatusBadge, today, WEEKDAYS } from '../lib/format';
 import type { Day } from '../lib/live';
@@ -25,6 +25,7 @@ function useEmployeeFields(creating: boolean): FieldSpec[] {
   const sites = useSites().data ?? [];
   const departments = useDepartments().data ?? [];
   const shifts = useShifts().data ?? [];
+  const categories = useEmploymentTypes();
   return [
     { key: 'fullName', label: 'Full name', required: true },
     { key: 'employeeCode', label: 'Employee code', required: true },
@@ -33,7 +34,7 @@ function useEmployeeFields(creating: boolean): FieldSpec[] {
     { key: 'designation', label: 'Designation' },
     { key: 'email', label: 'Email', type: 'email', hint: 'Needed only if they will sign in to the app' },
     { key: 'phone', label: 'Phone' },
-    { key: 'employmentType', label: 'Employment type', type: 'select', options: ['FULL_TIME', 'PART_TIME', 'CONTRACT', 'INTERN'].map((v) => ({ value: v, label: v.replace('_', ' ').toLowerCase() })) },
+    { key: 'employmentType', label: 'Employment type', type: 'select', hint: 'Leave types entitle per category (Settings → Organisation)', options: categories.map((c) => ({ value: c.code, label: c.label })) },
     { key: 'joinedOn', label: 'Joined on', type: 'date', required: true },
     { key: 'mobilePunch', label: 'Mobile punching', type: 'select', options: [{ value: 'NEVER', label: 'Never' }, { value: 'REMOTE_DAYS', label: 'On approved remote days' }, { value: 'ALWAYS', label: 'Always (field staff)' }, { value: 'FULL_REMOTE', label: 'Fully remote (every working day counts as remote)' }] },
     ...(creating ? [{ key: 'shiftId', label: 'Starting shift', type: 'select' as const, placeholder: 'Tenant default shift', options: shifts.filter((s) => s.active).map((s) => ({ value: s.id, label: `${s.name} (${s.startTime}–${s.endTime})` })) }] : []),
@@ -41,7 +42,7 @@ function useEmployeeFields(creating: boolean): FieldSpec[] {
   ];
 }
 
-const BLANK = { fullName: '', employeeCode: '', siteId: '', departmentId: '', managerId: '', designation: '', email: '', phone: '', employmentType: 'FULL_TIME', joinedOn: today(), mobilePunch: 'NEVER', shiftId: '', biometricConsent: false };
+const BLANK = { fullName: '', employeeCode: '', siteId: '', departmentId: '', managerId: '', designation: '', email: '', phone: '', employmentType: '', joinedOn: today(), mobilePunch: 'NEVER', shiftId: '', biometricConsent: false };
 
 function EmployeeForm({ employee, onClose }: { employee?: Employee; onClose: () => void }) {
   const navigate = useNavigate();
@@ -127,6 +128,7 @@ interface EmployeeDetail extends Employee {
 export function EmployeeDetail() {
   const { id } = useParams();
   const me = useMe();
+  const categories = useEmploymentTypes();
   const hr = isHr(me);
   const [tab, setTab] = useState('attendance');
   const [modal, setModal] = useState<'edit' | 'access' | 'offboard' | 'schedule' | null>(null);
@@ -163,7 +165,7 @@ export function EmployeeDetail() {
 
       {tab === 'profile' && (
         <Card><DescriptionList columns={3} items={[
-          { term: 'Department', value: e.department?.name }, { term: 'Manager', value: e.manager?.fullName }, { term: 'Employment', value: e.employmentType.replace('_', ' ').toLowerCase() },
+          { term: 'Department', value: e.department?.name }, { term: 'Manager', value: e.manager?.fullName }, { term: 'Employment', value: categories.find((c) => c.code === e.employmentType)?.label ?? e.employmentType },
           { term: 'Email', value: e.email }, { term: 'Phone', value: e.phone }, { term: 'Joined', value: e.joinedOn },
           { term: 'Mobile punching', value: e.mobilePunch.replace('_', ' ').toLowerCase() }, { term: 'Biometric consent', value: e.biometricConsentAt ? `Recorded ${e.biometricConsentAt.slice(0, 10)}` : 'Not recorded' },
           { term: 'App login', value: e.login ? <span className="flex gap-2">{ROLE_LABEL[e.login.role]} <StatusBadge value={e.login.status} map={REQUEST_STATUS} /></span> : 'No login' },

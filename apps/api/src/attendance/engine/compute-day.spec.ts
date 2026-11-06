@@ -1,4 +1,4 @@
-import { computeAttendanceDay, lateDeductionDays, EngineDay, EngineInput, EnginePolicy, EnginePunch } from './compute-day';
+import { absenceDeductionDays, computeAttendanceDay, lateDays, lateDeductionDays, EngineDay, EngineInput, EnginePolicy, EnginePunch } from './compute-day';
 import { punchWindow, resolveDay, RosterData, ShiftDef, shiftInstants, slotOf } from './schedule';
 
 const TZ = 'Asia/Kolkata';
@@ -316,5 +316,54 @@ describe('lateDeductionDays', () => {
     expect(lateDeductionDays(10, { lateDeduction: 'NONE', lateDeductionEvery: 2 })).toBe(0);
     expect(lateDeductionDays(10, {})).toBe(0);
     expect(lateDeductionDays(10, null)).toBe(0);
+  });
+});
+
+describe('permission (hourly leave)', () => {
+  const perm = (from: string, to: string) => ({ from: t(from), to: t(to) });
+  it('a morning permission moves the expected arrival: not late', () => {
+    const r = run({ permissions: [perm('09:00', '11:00')], punches: [p('11:05', 'in'), p('18:00', 'out')] });
+    expect(r).toMatchObject({ isLate: false, lateMinutes: 0, permissionMinutes: 120, workedMinutes: 415 });
+  });
+  it('arriving after the permission ends is still late', () => {
+    expect(run({ permissions: [perm('09:00', '10:00')], punches: [p('10:30', 'in'), p('18:00', 'out')] })).toMatchObject({ isLate: true, lateMinutes: 30 });
+  });
+  it('an evening permission moves the expected exit: no early exit', () => {
+    expect(run({ permissions: [perm('16:00', '18:00')], punches: [p('09:00', 'in'), p('16:00', 'out')] })).toMatchObject({ isEarlyExit: false, status: 'PRESENT' });
+  });
+  it('credits the hours towards the day: 3.5 h worked + 1 h permission is a half day, not absent', () => {
+    // required 480 (9–18 less 60 break), half day at 50% = 240
+    expect(run({ punches: [p('09:00', 'in'), p('12:30', 'out')] }).status).toBe('ABSENT');
+    expect(run({ permissions: [perm('12:30', '13:30')], punches: [p('09:00', 'in'), p('12:30', 'out')] }).status).toBe('HALF_DAY');
+  });
+  it('is ignored on an off day', () => {
+    expect(run({ day: offDay('WEEKLY_OFF'), permissions: [perm('09:00', '10:00')] }).permissionMinutes).toBe(0);
+  });
+});
+
+describe('multiple sessions a day', () => {
+  const bidirectional = [p('09:00', 'unknown'), p('13:00', 'unknown'), p('14:00', 'unknown'), p('18:00', 'unknown')];
+  it('FIRST_LAST: bidirectional punches are one session', () => {
+    expect(run({ punches: bidirectional }).segments).toHaveLength(1);
+  });
+  it('ALTERNATE: bidirectional punches pair as in, out, in, out', () => {
+    const r = run({ punches: bidirectional, policy: { ...POLICY, pairing: 'ALTERNATE' } });
+    expect(r).toMatchObject({ workedMinutes: 480, breakMinutes: 60, status: 'PRESENT', lastOut: t('18:00') });
+    expect(r.segments).toHaveLength(2);
+  });
+  it('directional punches always give one session per in/out pair', () => {
+    expect(run({ punches: [p('09:00', 'in'), p('11:00', 'out'), p('11:30', 'in'), p('18:00', 'out')] }).segments).toHaveLength(2);
+  });
+});
+
+describe('deductions', () => {
+  it('counts early exits as late only when the policy says so', () => {
+    const days = [{ isLate: true, isEarlyExit: false }, { isLate: false, isEarlyExit: true }, { isLate: false, isEarlyExit: false }];
+    expect(lateDays(days, {})).toBe(1);
+    expect(lateDays(days, { earlyExitCountsAsLate: true })).toBe(2);
+  });
+  it('unauthorised absence costs absenceDeduction days each (ECOG: 1.5)', () => {
+    expect([1, 2, 3, 4].map((n) => absenceDeductionDays(n, 0, { absenceDeduction: 1.5 }))).toEqual([1.5, 3, 4.5, 6]);
+    expect(absenceDeductionDays(2, 1, {})).toBe(2.5); // old snapshots: 1 per day, half days half
   });
 });

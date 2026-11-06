@@ -68,6 +68,8 @@ export class AuditableActionService {
 
 class AuditQuery {
   @IsOptional() @IsString() action?: string;
+  /** Leave one action out, e.g. PLATFORM_TENANT_OVERRIDE to hide support staff's page views. */
+  @IsOptional() @IsString() excludeAction?: string;
   @IsOptional() @IsString() actorUserId?: string;
   @IsOptional() @IsString() targetType?: string;
   @IsOptional() @IsString() targetId?: string;
@@ -89,7 +91,7 @@ export class AuditController {
     const size = q.size ?? 50;
     const where: Prisma.AuditLogWhereInput = {
       tenantId: user.tenantId,
-      action: q.action,
+      action: q.action ?? (q.excludeAction ? { not: q.excludeAction } : undefined),
       actorUserId: q.actorUserId,
       targetType: q.targetType,
       targetId: q.targetId,

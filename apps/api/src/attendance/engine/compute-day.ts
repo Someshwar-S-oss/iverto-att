@@ -42,6 +42,8 @@ export interface EnginePolicy {
   overtimeMinMinutes: number;
   breakDeduction: 'SHIFT_BREAK' | 'NONE';
   roundingMinutes: number;
+  /** Bidirectional-only punches: one first-in/last-out session, or alternating in/out sessions. Absent in old snapshots. */
+  pairing?: 'FIRST_LAST' | 'ALTERNATE';
 }
 
 export interface EngineDay {
@@ -69,10 +71,18 @@ export interface EngineLeave {
   leaveTypeId: string;
 }
 
+/** Approved hourly leave (permission), as an instant range within the day. */
+export interface EnginePermission {
+  from: Date;
+  to: Date;
+}
+
 export interface EngineInput {
   day: EngineDay;
   punches: EnginePunch[];
   leave: EngineLeave | null;
+  /** Credited towards the day's hours; covers lateness/early exit it overlaps. */
+  permissions?: EnginePermission[];
   remote: boolean;
   policy: EnginePolicy;
   now: Date;
@@ -102,6 +112,7 @@ export interface EngineResult {
   missedPunch: boolean;
   workedOnOffDay: boolean;
   hasLeaveConflict: boolean;
+  permissionMinutes: number;
   corrected: boolean;
   /** Window not yet closed: status stays PENDING. */
   open: boolean;
@@ -134,8 +145,8 @@ interface Pairing {
 function pair(punches: EnginePunch[], day: EngineDay, policy: EnginePolicy): Pairing {
   if (punches.length === 0) return { segments: [], missedPunch: false, inside: false };
 
-  // Only bidirectional gates were used: first-in / last-out.
-  if (punches.every((p) => p.direction === 'unknown')) {
+  // Only bidirectional gates were used: first-in / last-out, unless the policy alternates them.
+  if (policy.pairing !== 'ALTERNATE' && punches.every((p) => p.direction === 'unknown')) {
     const first = punches[0].at;
     const last = punches[punches.length - 1].at;
     const hasOut = punches.length > 1 && mins(first, last) >= policy.minSessionMinutes;
@@ -170,7 +181,7 @@ export function computeAttendanceDay(input: EngineInput): EngineResult {
   const open = now < day.windowEnd;
   const punches = dedupePunches(input.punches, policy.duplicatePunchSeconds);
   const corrected = punches.some((p) => p.source === 'CORRECTION');
-  const firstLast = punches.length > 0 && punches.every((p) => p.direction === 'unknown');
+  const firstLast = policy.pairing !== 'ALTERNATE' && punches.length > 0 && punches.every((p) => p.direction === 'unknown');
 
   const pairing = pair(punches, day, policy);
   let { missedPunch } = pairing;
@@ -211,11 +222,15 @@ export function computeAttendanceDay(input: EngineInput): EngineResult {
 
   // ── Status (§6.5), first match wins ──────────────────────────────────────
   const offDay = day.dayType !== 'WORKING';
+  const permissions = offDay ? [] : (input.permissions ?? []);
+  const permissionMinutes = permissions.reduce((s, p) => s + mins(p.from, p.to), 0);
+  // Permission counts as time worked for the day's status, never for overtime or the stored worked minutes.
+  const credited = worked + permissionMinutes;
   const required = leave?.portion === 0.5 ? day.requiredMinutes / 2 : day.requiredMinutes;
   const fullMin = (day.requiredMinutes * policy.fullDayMinPercent) / 100;
   const halfMin = (day.requiredMinutes * policy.halfDayMinPercent) / 100;
   const hoursStatus = (): DayStatus =>
-    day.requiredMinutes === 0 ? (worked > 0 ? 'PRESENT' : 'ABSENT') : worked >= fullMin ? 'PRESENT' : worked >= halfMin ? 'HALF_DAY' : 'ABSENT';
+    day.requiredMinutes === 0 ? (worked > 0 ? 'PRESENT' : 'ABSENT') : credited >= fullMin ? 'PRESENT' : credited >= halfMin ? 'HALF_DAY' : 'ABSENT';
 
   let status: DayStatus;
   let hasLeaveConflict = false;
@@ -233,16 +248,23 @@ export function computeAttendanceDay(input: EngineInput): EngineResult {
     hasLeaveConflict = punches.length > 0;
   } else if (leave?.portion === 0.5) {
     // The remaining half has to be worked to the usual half-day threshold.
-    status = worked >= halfMin ? 'HALF_LEAVE' : 'ABSENT';
-  } else if (remote && worked >= halfMin) {
-    status = worked >= fullMin ? 'REMOTE' : 'HALF_DAY';
+    status = credited >= halfMin ? 'HALF_LEAVE' : 'ABSENT';
+  } else if (remote && credited >= halfMin) {
+    status = credited >= fullMin ? 'REMOTE' : 'HALF_DAY';
   } else {
     status = hoursStatus();
   }
 
   // ── Flags against the schedule (flexible shifts: against core hours) ─────
-  const refStart = day.flexible ? day.coreStart : day.schedStart;
-  const refEnd = day.flexible ? day.coreEnd : day.schedEnd;
+  let refStart = day.flexible ? day.coreStart : day.schedStart;
+  let refEnd = day.flexible ? day.coreEnd : day.schedEnd;
+  // A permission at the start of the day moves the expected arrival to its end; at the end, the expected exit to its start.
+  for (const p of [...permissions].sort((a, b) => a.from.getTime() - b.from.getTime())) {
+    if (refStart && p.from.getTime() <= refStart.getTime() + policy.graceInMinutes * MIN && p.to > refStart) refStart = p.to;
+  }
+  for (const p of [...permissions].sort((a, b) => b.to.getTime() - a.to.getTime())) {
+    if (refEnd && p.to.getTime() >= refEnd.getTime() - policy.graceOutMinutes * MIN && p.from < refEnd) refEnd = p.from;
+  }
   let lateMinutes = 0;
   let earlyExitMinutes = 0;
   const judged = !offDay && leave?.portion !== 1;
@@ -280,6 +302,7 @@ export function computeAttendanceDay(input: EngineInput): EngineResult {
     missedPunch,
     workedOnOffDay,
     hasLeaveConflict,
+    permissionMinutes,
     corrected,
     open,
   };
@@ -322,4 +345,18 @@ export function lateDeductionDays(lateDays: number, policy: { lateDeduction?: un
   const unit = policy?.lateDeduction === 'HALF_DAY' ? 0.5 : policy?.lateDeduction === 'FULL_DAY' ? 1 : 0;
   const every = Number(policy?.lateDeductionEvery) || 0;
   return unit && every >= 1 ? Math.floor(lateDays / every) * unit : 0;
+}
+
+/** The days the late penalty counts: late arrivals, plus early exits when the policy says so. */
+export function lateDays(days: Array<{ isLate: boolean; isEarlyExit: boolean }>, policy: { earlyExitCountsAsLate?: unknown } | null | undefined): number {
+  return days.filter((d) => d.isLate || (policy?.earlyExitCountsAsLate === true && d.isEarlyExit)).length;
+}
+
+/**
+ * Pay deduction for absences without approved leave: `absenceDeduction` days each
+ * (1 = just the day itself; 1.5 = the day plus half a day's penalty). A HALF_DAY counts half.
+ */
+export function absenceDeductionDays(absent: number, halfDays: number, policy: { absenceDeduction?: unknown } | null | undefined): number {
+  const per = typeof policy?.absenceDeduction === 'number' ? policy.absenceDeduction : 1;
+  return Math.round((absent + halfDays / 2) * per * 100) / 100;
 }

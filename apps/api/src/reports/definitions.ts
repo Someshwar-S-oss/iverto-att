@@ -4,7 +4,7 @@
  * PDF, so the three can never disagree.
  */
 import { Prisma, PrismaClient } from '@prisma/client';
-import { lateDeductionDays } from '../attendance/engine/compute-day';
+import { absenceDeductionDays, lateDays, lateDeductionDays } from '../attendance/engine/compute-day';
 import { statusCode } from '../attendance/present';
 import { dbDate, eachDay, formatLocal, leaveYearOf, ymdOf } from '../common/time';
 
@@ -207,6 +207,8 @@ export const REPORTS: ReportDefinition[] = [
         ...dates.map((d) => ({ key: d, label: d.slice(8), align: 'center' as const, badge: true })),
         ...['P', 'A', 'HD', 'L', 'R', 'H', 'WO', 'LT'].map((k, i) => ({ key: `t_${k}`, label: k, align: 'right' as const, divider: i === 0 })),
         { key: 't_LD', label: 'Late ded.', align: 'right' },
+        { key: 't_AD', label: 'Absence ded.', align: 'right' },
+        { key: 't_PM', label: 'Perm. h', align: 'right' },
         { key: 't_OT', label: 'OT h', align: 'right' },
       ];
       const rows = [...byEmp.values()].map((list) => {
@@ -214,6 +216,7 @@ export const REPORTS: ReportDefinition[] = [
         const row: Record<string, unknown> = { code: e.employeeCode, name: e.fullName, department: e.department?.name ?? '' };
         for (const d of list) row[ymdOf(d.workDate)] = statusCode(d) + (d.isLate ? '*' : '');
         const count = (s: string) => list.filter((d) => d.status === s).length;
+        const policy = list[list.length - 1].policy as Record<string, unknown>;
         Object.assign(row, {
           t_P: count('PRESENT'),
           t_A: count('ABSENT'),
@@ -223,7 +226,10 @@ export const REPORTS: ReportDefinition[] = [
           t_H: count('HOLIDAY'),
           t_WO: count('WEEKLY_OFF'),
           t_LT: list.filter((d) => d.isLate).length,
-          t_LD: lateDeductionDays(list.filter((d) => d.isLate).length, list[list.length - 1].policy as Record<string, unknown>),
+          t_LD: lateDeductionDays(lateDays(list, policy), policy),
+          // Absent / half days without approved leave, at the policy's rate (e.g. 1.5 per day).
+          t_AD: absenceDeductionDays(count('ABSENT'), count('HALF_DAY'), policy),
+          t_PM: Math.round(list.reduce((s, d) => s + d.permissionMinutes, 0) / 6) / 10,
           t_OT: Math.round(list.reduce((s, d) => s + d.overtimeMinutes, 0) / 6) / 10,
         });
         return row;

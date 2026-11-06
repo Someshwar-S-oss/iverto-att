@@ -1,6 +1,7 @@
 import {
   Button, Card, Switch, ColorSwatchPicker, confirmAction, DateInput, Field, Modal, requestReason, SearchSelect, Select, TextField, Textarea, type SelectOption,
 } from '@iverto-org/core-ui';
+import { Check, Clock, Minus, X } from 'lucide-react';
 import { useId, useState, type MouseEvent, type ReactNode } from 'react';
 import { post, useAction, useDepartments, useEmployeeOptions, useSites } from '../lib/api';
 import { WEEKDAYS } from '../lib/format';
@@ -185,3 +186,56 @@ export function Decide({ path, id, noun, canDecide, canCancel }: { path: string;
 
 /** Drops '' so optional fields are omitted rather than sent empty (the API validates types strictly). */
 export const clean = (form: Record<string, unknown>) => Object.fromEntries(Object.entries(form).filter(([, v]) => v !== ''));
+
+// ── Approval tracker ────────────────────────────────────────────────────────
+
+export interface TrackStep { key: string; label: string; state: 'done' | 'current' | 'upcoming' | 'rejected' | 'cancelled' | 'skipped'; at: string | null; by: string | null; note: string | null }
+export interface Progress { levels: 1 | 2; stage: string; steps: TrackStep[] }
+
+const DOT: Record<TrackStep['state'], string> = {
+  done: 'bg-success text-white',
+  current: 'bg-brand text-on-brand ring-4 ring-brand-soft animate-pulse',
+  upcoming: 'bg-surface-subtle text-fg-subtle',
+  rejected: 'bg-danger-soft text-danger-fg',
+  cancelled: 'bg-surface-subtle text-fg-muted',
+  skipped: 'bg-surface-subtle text-fg-muted',
+};
+const GLYPH: Record<TrackStep['state'], ReactNode> = { done: <Check size={14} />, current: <Clock size={14} />, upcoming: null, rejected: <X size={14} />, cancelled: <X size={14} />, skipped: <Minus size={14} /> };
+const STATE_TEXT: Partial<Record<TrackStep['state'], string>> = { current: 'Waiting', skipped: 'Not needed', cancelled: 'Cancelled', rejected: 'Rejected' };
+
+/** Order-tracking style: Submitted → Manager → (HR) → Approved, with who, when and any reason. */
+export function ApprovalTracker({ progress }: { progress: Progress }) {
+  const { steps } = progress;
+  // The bar fills up to the last step that is no longer upcoming.
+  const reached = steps.reduce((n, s, i) => (s.state !== 'upcoming' ? i : n), 0);
+  const stopped = steps.some((s) => s.state === 'rejected' || s.state === 'cancelled');
+  return (
+    <div className="space-y-4" role="list" aria-label="Approval progress">
+      <div className="relative mx-4">
+        <div className="absolute inset-x-0 top-4 h-1 rounded-full bg-surface-subtle" />
+        <div className={`absolute left-0 top-4 h-1 rounded-full transition-all ${stopped ? 'bg-danger-soft' : 'bg-success'}`} style={{ width: `${(reached / (steps.length - 1)) * 100}%` }} />
+        <div className="relative flex justify-between">
+          {steps.map((s) => (
+            <div key={s.key} role="listitem" aria-label={`${s.label}: ${STATE_TEXT[s.state] ?? s.state}`}
+              className={`grid size-9 place-items-center rounded-full text-sm font-semibold ${DOT[s.state]}`}>
+              {GLYPH[s.state]}
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${steps.length}, minmax(0, 1fr))` }}>
+        {steps.map((s, i) => (
+          <div key={s.key} className={`text-xs ${i === 0 ? 'text-left' : i === steps.length - 1 ? 'text-right' : 'text-center'}`}>
+            <div className={`font-semibold ${s.state === 'rejected' ? 'text-danger-fg' : s.state === 'upcoming' ? 'text-fg-subtle' : 'text-fg'}`}>{s.label}</div>
+            {STATE_TEXT[s.state] && s.label !== STATE_TEXT[s.state] && <div className="text-fg-muted">{STATE_TEXT[s.state]}</div>}
+            {s.by && <div className="text-fg-muted">{s.by}</div>}
+            {s.at && <div className="text-fg-subtle">{new Date(s.at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}</div>}
+          </div>
+        ))}
+      </div>
+      {steps.filter((s) => s.note && (s.state === 'rejected' || s.state === 'cancelled')).map((s) => (
+        <div key={s.key} className="rounded-lg bg-danger-soft px-3 py-2 text-sm text-danger-fg"><span className="font-semibold">Reason: </span>{s.note}</div>
+      ))}
+    </div>
+  );
+}

@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Injectable, Param, Post, Query } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
-import { IsIn, IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import { IsBoolean, IsIn, IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min, MinLength } from 'class-validator';
 import { AuditableActionService } from '../audit/audit.service';
 import { AzureBlobService } from '../common/azure-blob.service';
 import { actorOf, AuthUser, CurrentUser, isHrOrAdmin } from '../auth/auth.types';
@@ -44,6 +44,8 @@ export class RequestListQuery {
   @IsOptional() @IsYmd() to?: string;
   @IsOptional() @IsString() cursor?: string;
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(200) limit?: number;
+  /** Remote work: requests waiting for *my* decision (a manager's queue leaves out those passed on to HR). */
+  @IsOptional() @Transform(({ value }) => value === true || value === 'true') @IsBoolean() awaitingMe?: boolean;
 }
 
 /** Missed-punch fixes (§1: without it "absent" is unfixable). Approval adds CORRECTION punches; nothing is overwritten (D5). */

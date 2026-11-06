@@ -23,7 +23,11 @@ SELECT pg_temp.add_check('attendance_days', 'attendance_days_status_chk',
 SELECT pg_temp.add_check('shifts', 'shifts_kind_chk', $$kind IN ('FIXED','FLEXIBLE')$$);
 SELECT pg_temp.add_check('employee_schedules', 'employee_schedules_one_source_chk',
   $$(shift_id IS NOT NULL AND pattern_id IS NULL) OR (shift_id IS NULL AND pattern_id IS NOT NULL AND anchor_date IS NOT NULL)$$);
-SELECT pg_temp.add_check('leave_types', 'leave_types_accrual_chk', $$accrual_kind IN ('NONE','MONTHLY','YEARLY_UPFRONT')$$);
+SELECT pg_temp.add_check('leave_types', 'leave_types_accrual_chk', $$accrual_kind IN ('NONE','MONTHLY','YEARLY_UPFRONT','UNLIMITED')$$);
+SELECT pg_temp.add_check('leave_types', 'leave_types_unit_chk', $$unit IN ('DAYS','HOURS') AND (unit = 'DAYS' OR accrual_kind = 'UNLIMITED')$$);
+SELECT pg_temp.add_check('leave_requests', 'leave_requests_hours_chk', $$minutes IS NULL OR (minutes > 0 AND start_date = end_date AND start_time IS NOT NULL AND end_time IS NOT NULL)$$);
+SELECT pg_temp.add_check('attendance_policies', 'attendance_policies_pairing_chk', $$pairing IN ('FIRST_LAST','ALTERNATE') AND absence_deduction >= 0$$);
+SELECT pg_temp.add_check('sites', 'sites_geofence_chk', $$geofence_radius_m IS NULL OR (geofence_radius_m > 0 AND lat IS NOT NULL AND lng IS NOT NULL)$$);
 SELECT pg_temp.add_check('leave_ledger', 'leave_ledger_kind_chk',
   $$kind IN ('OPENING','ACCRUAL','DEBIT','REVERSAL','ADJUSTMENT','CARRY_FORWARD','LAPSE','COMP_CREDIT')$$);
 SELECT pg_temp.add_check('leave_requests', 'leave_requests_status_chk', $$status IN ('PENDING','APPROVED','REJECTED','CANCELLED')$$);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { actionTone, auditFields, humanize } from './audit';
+import { actionLabel, actionTone, auditFields, auditSentence, humanize, pageOf, readableFields, SUPPORT_ACCESS, type AuditEntry } from './audit';
 
 describe('audit formatting', () => {
   it('humanizes codes and camelCase', () => {
@@ -18,5 +18,36 @@ describe('audit formatting', () => {
       { term: 'Note', value: '—' },
     ]);
     expect(auditFields(null)).toEqual([]);
+  });
+});
+
+describe('plain-language audit', () => {
+  const names: Record<string, string> = { e1: 'Pooja', cl: 'Casual leave' };
+  const nameOf = (_k: string, id: string) => names[id];
+  const entry = (action: string, payload: unknown, extra: Partial<AuditEntry> = {}): AuditEntry =>
+    ({ action, payload, actorUserId: 'u1', actorType: 'user', targetType: null, targetId: null, createdAt: '2026-11-06T17:00:00Z', ...extra });
+
+  it('says what happened, with names instead of ids', () => {
+    expect(auditSentence(entry('LEAVE_APPROVED', { employeeId: 'e1', leaveTypeId: 'cl', from: '2026-12-02', to: '2026-12-03' }), nameOf))
+      .toBe('approved Pooja’s Casual leave (2 Dec 2026 – 3 Dec 2026)');
+    expect(auditSentence(entry('LEAVE_REJECTED', { note: 'Busy' }), nameOf)).toBe('rejected a leave');
+    expect(auditSentence(entry('EMPLOYEE_UPDATED', {}, { targetType: 'Employee', targetId: 'e1' }), nameOf)).toBe('changed Pooja’s details');
+    expect(actionLabel('LEAVE_MANAGER_APPROVED')).toBe('Leave approved by manager');
+    expect(actionLabel('SOMETHING_NEW')).toBe('Something new');
+  });
+
+  it('turns support access URLs into page names', () => {
+    expect(auditSentence(entry(SUPPORT_ACCESS, { method: 'GET', url: '/v1/audit-logs?page=1&size=50' }), nameOf)).toBe('viewed Audit log');
+    expect(auditSentence(entry(SUPPORT_ACCESS, { method: 'PATCH', url: '/v1/attendance-policies/x' }), nameOf)).toBe('edited something in Attendance policies');
+    expect(pageOf('/v1/employees?size=500')).toBe('Employees');
+    expect(pageOf('/v1/something-else')).toBe('Something else');
+  });
+
+  it('details show names, hide unknown ids, and read dates', () => {
+    expect(readableFields({ employeeId: 'e1', requestId: 'zz', from: '2026-12-02', note: 'ok' }, nameOf)).toEqual([
+      { term: 'Employee', value: 'Pooja' },
+      { term: 'From', value: '2 Dec 2026' },
+      { term: 'Note', value: 'ok' },
+    ]);
   });
 });

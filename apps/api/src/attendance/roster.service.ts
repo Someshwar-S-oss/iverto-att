@@ -61,6 +61,9 @@ export function policySnapshot(p: AttendancePolicy | null): EnginePolicy & Recor
     roundingMinutes: p?.roundingMinutes ?? 0,
     lateDeduction: p?.lateDeduction ?? 'NONE',
     lateDeductionEvery: p?.lateDeductionEvery ?? 2,
+    earlyExitCountsAsLate: p?.earlyExitCountsAsLate ?? false,
+    absenceDeduction: p?.absenceDeduction ?? 1,
+    pairing: (p?.pairing ?? 'FIRST_LAST') as EnginePolicy['pairing'],
   };
 }
 

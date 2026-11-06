@@ -1,7 +1,7 @@
 import { Badge, Button, Callout, Switch, DataTable, FileDropzone, Modal } from '@iverto-org/core-ui';
 import { ArrowLeft, Check, CheckCircle2, Download, FileSpreadsheet, MapPin, RefreshCw, Trash2, Upload, Wand2 } from 'lucide-react';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { post, useAction, useDepartments, useEmployeeOptions, useSites } from '../lib/api';
+import { post, useAction, useDepartments, useEmployeeOptions, useEmploymentTypes, useSites } from '../lib/api';
 import { downloadCsv, headerKey, normaliseDate, parseCsv, toCsv } from '../lib/csv';
 import { today } from '../lib/format';
 import { Pick, SitePicker } from './ui';
@@ -10,7 +10,6 @@ import { Pick, SitePicker } from './ui';
 
 type Key = 'employeeCode' | 'fullName' | 'departmentName' | 'designation' | 'managerCode' | 'email' | 'phone' | 'employmentType' | 'joinedOn' | 'mobilePunch';
 
-const EMPLOYMENT = ['FULL_TIME', 'PART_TIME', 'CONTRACT', 'INTERN'];
 const MOBILE = ['NEVER', 'REMOTE_DAYS', 'ALWAYS', 'FULL_REMOTE'];
 
 /** Every column the API's import understands (siteName comes from the location step). `aka` = header spellings we recognise. */
@@ -23,7 +22,7 @@ const COLUMNS: { key: Key; label: string; required?: boolean; rule: string; aka:
   { key: 'managerCode', label: 'Manager’s code', rule: 'An existing employee, or someone in this file', aka: ['manager', 'managerid', 'reportsto', 'reportingmanager', 'managercode'] },
   { key: 'email', label: 'Email', rule: 'Needed only for app sign-in', aka: ['emailaddress', 'mail', 'workemail', 'emailid'] },
   { key: 'phone', label: 'Phone', rule: 'Up to 30 characters', aka: ['mobile', 'phonenumber', 'mobilenumber', 'contact', 'contactnumber'] },
-  { key: 'employmentType', label: 'Employment type', rule: EMPLOYMENT.join(' · '), aka: ['type', 'employment', 'employmenttype'] },
+  { key: 'employmentType', label: 'Employment type', rule: 'A category from Settings → Organisation', aka: ['type', 'employment', 'employmenttype', 'category'] },
   { key: 'mobilePunch', label: 'Mobile punching', rule: MOBILE.join(' · '), aka: ['mobilepunching', 'mobilecheckin', 'mobilepunch'] },
 ];
 const LABEL = Object.fromEntries(COLUMNS.map((c) => [c.key, c.label])) as Record<Key, string>;
@@ -251,6 +250,7 @@ function Review({ rows, checked, fresh, pending, problems, departments, onlyProb
   removeRow: (id: number) => void; siteName: string;
 }) {
   const employees = useEmployeeOptions().data?.items ?? [];
+  const categories = useEmploymentTypes();
   const bad = rows.filter((r) => problems.get(r._id)?.length);
   const shown = (onlyProblems ? bad : rows).slice(0, 200);
   const errorOf = (r: Row, key: Key) => problems.get(r._id)?.find((e) => e.field === key)?.message;
@@ -271,7 +271,7 @@ function Review({ rows, checked, fresh, pending, problems, departments, onlyProb
   const choices = (key: Key) =>
     key === 'departmentName' ? departments.map((d) => ({ value: d.name, label: d.name }))
     : key === 'managerCode' ? [...employees.map((e) => ({ value: e.employeeCode, label: e.fullName, description: e.employeeCode })), ...rows.filter((r) => r.employeeCode).map((r) => ({ value: r.employeeCode, label: r.fullName || r.employeeCode, description: `${r.employeeCode} · in this file` }))]
-    : key === 'employmentType' ? EMPLOYMENT.map((v) => ({ value: v, label: v.replace('_', ' ').toLowerCase() }))
+    : key === 'employmentType' ? categories.map((c) => ({ value: c.code, label: c.label }))
     : key === 'mobilePunch' ? MOBILE.map((v) => ({ value: v, label: v.replace('_', ' ').toLowerCase() }))
     : [];
 

@@ -4,14 +4,19 @@ import { Prisma } from '@prisma/client';
 import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
+  ArrayMinSize,
   IsArray,
   IsBoolean,
   IsHexColor,
   IsIn,
   IsInt,
+  IsLatitude,
+  IsLongitude,
+  IsNumber,
   IsOptional,
   IsString,
   IsUrl,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -34,6 +39,24 @@ class BrandingDto {
   @IsOptional() @IsString() @MaxLength(120) displayName?: string;
 }
 
+/** Categories every organisation starts with; settings.employmentTypes replaces them. */
+export const DEFAULT_EMPLOYMENT_TYPES = [
+  { code: 'FULL_TIME', label: 'Full time' },
+  { code: 'PART_TIME', label: 'Part time' },
+  { code: 'CONTRACT', label: 'Contract' },
+  { code: 'INTERN', label: 'Intern' },
+];
+
+export const employmentTypesOf = (settings: unknown): Array<{ code: string; label: string }> =>
+  ((settings as Record<string, any> | null)?.employmentTypes as Array<{ code: string; label: string }> | undefined)?.length
+    ? (settings as Record<string, any>).employmentTypes
+    : DEFAULT_EMPLOYMENT_TYPES;
+
+class EmploymentTypeDto {
+  @Matches(/^[A-Z0-9_]{1,20}$/, { message: 'code must be 1–20 uppercase letters, digits or _' }) code: string;
+  @IsString() @MinLength(1) @MaxLength(40) label: string;
+}
+
 export class OrgSettingsDto {
   @IsOptional() @IsString() @MinLength(2) @MaxLength(120) name?: string;
   @IsOptional() @IsHm() dayBoundary?: string;
@@ -43,6 +66,10 @@ export class OrgSettingsDto {
   @IsOptional() @IsBoolean() leaveCountsAgainstAttendance?: boolean;
   /** Interns (employmentType INTERN) are outside payroll: no leave types, balances or accruals. */
   @IsOptional() @IsBoolean() internsEnabled?: boolean;
+  /** Remote work needs the manager and then HR/admin (two levels). Leave sets this per leave type. */
+  @IsOptional() @IsBoolean() remoteRequiresHrApproval?: boolean;
+  /** The organisation's employee categories (Permanent, Temporary, …); leave types entitle per category. */
+  @IsOptional() @IsArray() @ArrayMinSize(1) @ArrayMaxSize(20) @ValidateNested({ each: true }) @Type(() => EmploymentTypeDto) employmentTypes?: EmploymentTypeDto[];
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(3650) punchPhotoRetentionDays?: number;
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(3650) reportRetentionDays?: number;
   @IsOptional() @ValidateNested() @Type(() => BrandingDto) branding?: BrandingDto;
@@ -53,6 +80,12 @@ export class SiteDto {
   @IsOptional() @IsString() @MaxLength(300) address?: string;
   @IsTimeZone() timezone: string;
   @IsOptional() @IsString() holidayCalendarId?: string | null;
+  /** Geofence centre and radius; a radius needs both coordinates (DB check). null clears. */
+  @IsOptional() @IsLatitude() lat?: number | null;
+  @IsOptional() @IsLongitude() lng?: number | null;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(10) @Max(100_000) geofenceRadiusM?: number | null;
+  /** Refuse mobile punches outside the geofence instead of sending them for review. */
+  @IsOptional() @IsBoolean() geofenceStrict?: boolean;
 }
 
 export class DepartmentDto {
@@ -116,6 +149,9 @@ export class PolicyDto {
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(168) maxWeeklyHours?: number;
   @IsOptional() @IsIn(['NONE', 'HALF_DAY', 'FULL_DAY']) lateDeduction?: string;
   @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(31) lateDeductionEvery?: number;
+  @IsOptional() @IsBoolean() earlyExitCountsAsLate?: boolean;
+  @IsOptional() @Type(() => Number) @IsNumber({ maxDecimalPlaces: 2 }) @Min(0) @Max(5) absenceDeduction?: number;
+  @IsOptional() @IsIn(['FIRST_LAST', 'ALTERNATE']) pairing?: string;
 }
 
 /** Records audited through one helper to keep controllers flat. */
@@ -147,6 +183,12 @@ export class OrgController {
   async update(@CurrentUser() user: AuthUser, @Body() dto: OrgSettingsDto) {
     const tenant = await this.prisma.tenant.findUniqueOrThrow({ where: { id: user.tenantId } });
     const { name, ...patch } = dto;
+    if (dto.employmentTypes) {
+      const codes = new Set(dto.employmentTypes.map((t) => t.code));
+      if (codes.size !== dto.employmentTypes.length) throw new AppError(400, 'DUPLICATE_EMPLOYMENT_TYPE', 'Employment type codes must be unique');
+      const inUse = await this.prisma.employee.findFirst({ where: { tenantId: user.tenantId, employmentType: { notIn: [...codes] } }, select: { employmentType: true } });
+      if (inUse) throw new AppError(409, 'EMPLOYMENT_TYPE_IN_USE', `Employees are still ${inUse.employmentType}; move them to another type first`);
+    }
     const settings = { ...(tenant.settings as object), ...patch };
     const updated = await audited(this.audit, user, 'ORG_SETTINGS_UPDATED', 'Tenant', (tx) =>
       tx.tenant.update({ where: { id: user.tenantId }, data: { name, settings: settings as Prisma.InputJsonValue } }),

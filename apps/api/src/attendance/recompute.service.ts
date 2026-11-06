@@ -5,7 +5,7 @@ import { Job, Queue } from 'bullmq';
 import { AuditActor } from '../auth/auth.types';
 import { PrismaService } from '../common/prisma.service';
 import { runAsSystem } from '../common/rls';
-import { addDays, dbDate, eachDay, Ymd, ymdOf } from '../common/time';
+import { addDays, dbDate, eachDay, Ymd, ymdOf, zonedInstant } from '../common/time';
 import { LiveGateway } from '../live/live.gateway';
 import { computeAttendanceDay, EngineLeave, EnginePolicy } from './engine/compute-day';
 import { presentDay } from './present';
@@ -92,13 +92,18 @@ export class RecomputeService {
       const day = await tx.attendanceDay.findUnique({ where: { employeeId_workDate: { employeeId, workDate: dbDate(date) } } });
       if (!day) return null; // outside employment
 
-      const [punches, leave, remote] = await Promise.all([
+      const [punches, leave, permissions, remote] = await Promise.all([
         tx.punch.findMany({
           where: { employeeId, outcome: 'GRANTED', punchedAt: { gte: day.windowStart, lt: day.windowEnd } },
           orderBy: { punchedAt: 'asc' },
         }),
         tx.leaveRequest.findFirst({
-          where: { employeeId, status: 'APPROVED', startDate: { lte: dbDate(date) }, endDate: { gte: dbDate(date) } },
+          where: { employeeId, status: 'APPROVED', minutes: null, startDate: { lte: dbDate(date) }, endDate: { gte: dbDate(date) } },
+        }),
+        // Hourly leave (permission) on this date.
+        tx.leaveRequest.findMany({
+          where: { employeeId, status: 'APPROVED', minutes: { not: null }, startDate: dbDate(date) },
+          select: { startTime: true, endTime: true },
         }),
         tx.remoteWorkRequest.findFirst({
           where: { employeeId, status: 'APPROVED', startDate: { lte: dbDate(date) }, endDate: { gte: dbDate(date) } },
@@ -117,6 +122,7 @@ export class RecomputeService {
         day: engineDayOf(day),
         punches: punches.map((p) => ({ at: p.punchedAt, direction: p.direction as any, source: p.source })),
         leave: engineLeave,
+        permissions: permissions.map((p) => ({ from: zonedInstant(date, p.startTime!, day.timezone), to: zonedInstant(date, p.endTime!, day.timezone) })),
         remote: isRemote,
         policy: day.policy as unknown as EnginePolicy,
         now: new Date(),
@@ -144,6 +150,7 @@ export class RecomputeService {
           leavePortion: engineLeave?.portion ?? 0,
           leaveHalf: engineLeave?.half ?? null,
           leaveTypeId: engineLeave?.leaveTypeId ?? null,
+          permissionMinutes: r.permissionMinutes,
           remote: isRemote,
           corrected: r.corrected,
           finalizedAt: day.finalizedAt ?? (r.open ? null : new Date()),

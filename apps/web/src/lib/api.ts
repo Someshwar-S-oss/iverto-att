@@ -143,7 +143,7 @@ export interface Cursor<T> { data: T[]; nextCursor: string | null }
 export interface Named { id: string; name: string }
 export interface Site extends Named { timezone: string; address?: string | null; holidayCalendarId?: string | null }
 export interface Shift extends Named { code: string; color: string | null; kind: string; startTime: string; endTime: string; breakMinutes: number; requiredMinutes: number; isNight: boolean; isDefault: boolean; active: boolean }
-export interface LeaveType extends Named { code: string; color: string | null; active: boolean; allowHalfDay: boolean }
+export interface LeaveType extends Named { code: string; color: string | null; active: boolean; allowHalfDay: boolean; unit: 'DAYS' | 'HOURS' }
 export interface EmployeeLite { id: string; fullName: string; employeeCode: string; email?: string | null; siteId: string; departmentId: string | null }
 export interface UserProfile { userId: string; email: string; displayName: string; role: string; status: string; employeeId: string | null; siteIds: string[]; mustChangePassword: boolean; createdAt: string }
 
@@ -152,6 +152,15 @@ export const useDepartments = () => useApi<(Named & { code?: string })[]>('/depa
 export const useProjects = () => useApi<Named[]>('/projects', undefined, REFERENCE);
 export const useShifts = () => useApi<Shift[]>('/shifts', undefined, REFERENCE);
 export const useLeaveTypes = () => useApi<LeaveType[]>('/leave/types', undefined, REFERENCE);
+
+/** The organisation's employee categories (Settings → Organisation), defaulting like the API does. */
+export const DEFAULT_EMPLOYMENT_TYPES = [
+  { code: 'FULL_TIME', label: 'Full time' }, { code: 'PART_TIME', label: 'Part time' }, { code: 'CONTRACT', label: 'Contract' }, { code: 'INTERN', label: 'Intern' },
+];
+export const useEmploymentTypes = (): { code: string; label: string }[] => {
+  const list = useApi<{ settings: Record<string, any> }>('/org', undefined, REFERENCE).data?.settings.employmentTypes;
+  return list?.length ? list : DEFAULT_EMPLOYMENT_TYPES;
+};
 export const usePolicies = () => useApi<Named[]>('/attendance-policies', undefined, REFERENCE);
 export const useCalendars = () => useApi<Named[]>('/holiday-calendars', undefined, REFERENCE);
 export const useUsers = (enabled = true) => useApi<UserProfile[]>('/users', undefined, { ...REFERENCE, enabled });

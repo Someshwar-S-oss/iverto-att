@@ -33,6 +33,9 @@ import { LeaveListQuery, LeaveModule, LeaveRequestDto, LeaveService, NoteDto } f
 import { LiveService } from '../live/live.module';
 import { NotificationsService } from '../notifications/notifications';
 import { MobilePunchDto, RemoteModule, RemoteRequestDto, RemoteService } from '../remote/remote';
+
+const geofenceOf = (s: { lat: number | null; lng: number | null; geofenceRadiusM: number | null; geofenceStrict: boolean }) =>
+  s.lat !== null && s.lng !== null && s.geofenceRadiusM ? { lat: s.lat, lng: s.lng, radiusM: s.geofenceRadiusM, strict: s.geofenceStrict } : null;
 import { ScheduleModule, ScheduleService } from '../schedule/schedule';
 import { ChangePasswordDto, UsersModule } from '../users/users.controller';
 import { UsersService } from '../users/users.service';
@@ -130,7 +133,8 @@ export class MobileService {
             fullName: employee.fullName,
             designation: employee.designation,
             department: employee.department ? { id: employee.department.id, name: employee.department.name } : null,
-            site: { id: employee.site.id, name: employee.site.name, timezone: employee.site.timezone },
+            site: { id: employee.site.id, name: employee.site.name, timezone: employee.site.timezone, geofence: geofenceOf(employee.site) },
+            employmentType: employee.employmentType,
             manager: employee.manager,
             joinedOn: ymdOf(employee.joinedOn),
           }
@@ -177,7 +181,7 @@ export class MobileService {
 
   async today(user: AuthUser) {
     const employee = await this.selfOrNull(user);
-    if (!employee) return { timezone: await this.tenantTz(user), now: new Date(), day: null, punches: [], nextShift: null, mobilePunch: { mode: 'NEVER', allowedNow: false } };
+    if (!employee) return { timezone: await this.tenantTz(user), now: new Date(), day: null, punches: [], nextShift: null, mobilePunch: { mode: 'NEVER', allowedNow: false, nextDirection: 'in', geofence: null } };
     const tz = employee.site.timezone;
     const now = new Date();
     // Attendance "today" is the work date whose window contains now (a night shift is still yesterday's).
@@ -214,6 +218,9 @@ export class MobileService {
       mobilePunch: {
         mode: employee.mobilePunch,
         allowedNow: ['ALWAYS', 'FULL_REMOTE'].includes(employee.mobilePunch) || (employee.mobilePunch === 'REMOTE_DAYS' && Boolean(remote)),
+        // Any number of sessions a day: the next punch is the opposite of the last one that counts.
+        nextDirection: punches.filter((p) => p.outcome === 'GRANTED' && p.direction !== 'unknown').at(-1)?.direction === 'in' ? 'out' : 'in',
+        geofence: geofenceOf(employee.site),
       },
     };
   }
@@ -451,19 +458,29 @@ export class MobileController {
     // No balances = no active types, or an intern without leave: nothing to apply for either way.
     if (!balances.length) return [];
     const types = await this.prisma.leaveType.findMany({ where: { tenantId: user.tenantId, active: true }, orderBy: { code: 'asc' } });
-    return types.map((t) => ({
-      id: t.id,
-      code: t.code,
-      name: t.name,
-      color: t.color,
-      paid: t.paid,
-      allowHalfDay: t.allowHalfDay,
-      requiresAttachment: t.requiresAttachment,
-      minNoticeDays: t.minNoticeDays,
-      countsOffDays: t.countsOffDays,
-      allowNegative: t.allowNegative,
-      available: balances.find((b) => b.leaveType.id === t.id)?.available ?? 0,
-    }));
+    // Only types this person is eligible for appear in balances.
+    return types
+      .filter((t) => balances.some((b) => b.leaveType.id === t.id))
+      .map((t) => {
+        const b = balances.find((x) => x.leaveType.id === t.id)!;
+        return {
+          id: t.id,
+          code: t.code,
+          name: t.name,
+          color: t.color,
+          paid: t.paid,
+          unit: t.unit,
+          allowHalfDay: t.unit === 'DAYS' && t.allowHalfDay,
+          requiresAttachment: t.requiresAttachment,
+          minNoticeDays: t.minNoticeDays,
+          countsOffDays: t.countsOffDays,
+          allowNegative: t.allowNegative,
+          /** null for unlimited types (LOP, permission): only `quota` limits them. */
+          available: b.available,
+          eligibleFrom: b.entitlement.eligibleFrom,
+          quota: b.quota,
+        };
+      });
   }
 
   @Get('leave/requests')
@@ -557,7 +574,7 @@ export class MobileController {
         ? await this.leave.list(user, { ...base, awaitingMe: true } as LeaveListQuery)
         : q.type === 'correction'
           ? await this.corrections.list(user, base as RequestListQuery)
-          : await this.remote.list(user, base as RequestListQuery);
+          : await this.remote.list(user, { ...base, awaitingMe: true } as RequestListQuery);
     // Never show someone their own request to decide.
     return { ...page, data: (page.data as Array<{ employeeId: string }>).filter((r) => r.employeeId !== user.employeeId) };
   }
@@ -574,7 +591,9 @@ export class MobileController {
   @Post('approvals/:type/:id/reject')
   @Roles('ADMIN', 'HR', 'MANAGER')
   reject(@CurrentUser() user: AuthUser, @Param('type') type: string, @Param('id') id: string, @Body() dto: NoteDto) {
-    const note = dto.note?.trim() || 'Rejected';
+    // A rejection always carries a reason, at every approval level.
+    const note = dto.note?.trim() ?? '';
+    if (note.length < 3) throw new AppError(400, 'REASON_REQUIRED', 'Give a reason for the rejection');
     if (type === 'leave') return this.leave.reject(user, id, note);
     if (type === 'correction') return this.corrections.decide(user, id, false, note);
     if (type === 'remote') return this.remote.decide(user, id, 'REJECTED', note);

@@ -2,7 +2,7 @@ import { Body, Controller, Get, Injectable, Logger, Module, Param, Patch, Post, 
 import { ApiTags } from '@nestjs/swagger';
 import { Employee, Prisma } from '@prisma/client';
 import { Transform, Type } from 'class-transformer';
-import { IsBoolean, IsEmail, IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { IsBoolean, IsEmail, IsIn, IsInt, IsOptional, IsString, Matches, Max, MaxLength, Min, MinLength } from 'class-validator';
 import { RecomputeQueue } from '../attendance/recompute.service';
 import { AuditableActionService } from '../audit/audit.service';
 import { actorOf, AuditActor, AuthUser, CurrentUser, Roles } from '../auth/auth.types';
@@ -12,13 +12,15 @@ import { PrismaService } from '../common/prisma.service';
 import { runAsSystem } from '../common/rls';
 import { addDays, dbDate, localYmd, ymdOf } from '../common/time';
 import { IsYmd } from '../common/validators';
+import { employmentTypesOf } from '../org/org';
 import { TerminalEnrollmentService } from '../terminals/services/terminal-enrollment.service';
 import { TerminalsModule } from '../terminals/terminals.module';
 import { UsersModule } from '../users/users.controller';
 import { UsersService } from '../users/users.service';
 
 const MOBILE_PUNCH = ['NEVER', 'REMOTE_DAYS', 'ALWAYS', 'FULL_REMOTE'] as const;
-const EMPLOYMENT_TYPES = ['FULL_TIME', 'PART_TIME', 'CONTRACT', 'INTERN'];
+/** Shape only here; the tenant's own list (Settings → employee categories) is checked in validateRefs. */
+const EMPLOYMENT_TYPE = /^[A-Z0-9_]{1,20}$/;
 
 /** YYYY-MM-DD that is also a calendar date (rejects 2026-02-30). */
 export const isRealYmd = (s: string) => /^\d{4}-\d{2}-\d{2}$/.test(s) && new Date(`${s}T00:00:00Z`).toISOString().slice(0, 10) === s;
@@ -32,7 +34,7 @@ export class EmployeeDto {
   @IsOptional() @IsEmail() email?: string | null;
   @IsOptional() @IsString() @MaxLength(30) phone?: string | null;
   @IsOptional() @IsString() @MaxLength(80) designation?: string | null;
-  @IsOptional() @IsIn(EMPLOYMENT_TYPES) employmentType?: string;
+  @IsOptional() @Matches(EMPLOYMENT_TYPE) employmentType?: string;
   @IsYmd() joinedOn: string;
   @IsOptional() @IsIn(MOBILE_PUNCH) mobilePunch?: (typeof MOBILE_PUNCH)[number];
   /** HR confirms the employee consented to face enrolment (§17). */
@@ -50,7 +52,7 @@ export class UpdateEmployeeDto {
   @IsOptional() @IsEmail() email?: string | null;
   @IsOptional() @IsString() @MaxLength(30) phone?: string | null;
   @IsOptional() @IsString() @MaxLength(80) designation?: string | null;
-  @IsOptional() @IsIn(EMPLOYMENT_TYPES) employmentType?: string;
+  @IsOptional() @Matches(EMPLOYMENT_TYPE) employmentType?: string;
   @IsOptional() @IsYmd() joinedOn?: string;
   @IsOptional() @IsYmd() exitOn?: string | null;
   @IsOptional() @IsIn(MOBILE_PUNCH) mobilePunch?: (typeof MOBILE_PUNCH)[number];
@@ -134,7 +136,12 @@ export class EmployeesService {
     private readonly enrollment: TerminalEnrollmentService,
   ) {}
 
-  private async validateRefs(tenantId: string, d: { siteId?: string; departmentId?: string | null; managerId?: string | null }, selfId?: string) {
+  private async validateRefs(tenantId: string, d: { siteId?: string; departmentId?: string | null; managerId?: string | null; employmentType?: string }, selfId?: string) {
+    if (d.employmentType) {
+      const tenant = await this.prisma.tenant.findUniqueOrThrow({ where: { id: tenantId }, select: { settings: true } });
+      const types = employmentTypesOf(tenant.settings).map((t) => t.code);
+      if (!types.includes(d.employmentType)) throw new AppError(400, 'UNKNOWN_EMPLOYMENT_TYPE', `employmentType must be one of ${types.join(', ')}`);
+    }
     if (d.siteId && !(await this.prisma.site.count({ where: { id: d.siteId, tenantId } }))) throw new AppError(400, 'SITE_NOT_FOUND', 'Unknown site');
     if (d.departmentId && !(await this.prisma.department.count({ where: { id: d.departmentId, tenantId } }))) {
       throw new AppError(400, 'DEPARTMENT_NOT_FOUND', 'Unknown department');
@@ -164,6 +171,7 @@ export class EmployeesService {
         const e = await tx.employee.create({
           data: {
             ...data,
+            employmentType: data.employmentType ?? employmentTypesOf(tenant.settings)[0].code,
             email: data.email?.toLowerCase() ?? null,
             tenantId: user.tenantId,
             joinedOn: dbDate(dto.joinedOn),
@@ -306,11 +314,16 @@ export class EmployeesService {
     for (const required of ['employeeCode', 'fullName', 'joinedOn', ...(dto.siteId ? [] : ['siteName'])]) {
       if (col(required) < 0) throw new AppError(400, 'MISSING_COLUMN', `Missing column ${required}`);
     }
-    const [sites, departments, existing] = await Promise.all([
+    const [sites, departments, existing, tenant] = await Promise.all([
       this.prisma.site.findMany({ where: { tenantId: user.tenantId } }),
       this.prisma.department.findMany({ where: { tenantId: user.tenantId } }),
       this.prisma.employee.findMany({ where: { tenantId: user.tenantId }, select: { id: true, employeeCode: true } }),
+      this.prisma.tenant.findUniqueOrThrow({ where: { id: user.tenantId }, select: { settings: true } }),
     ]);
+    const categories = employmentTypesOf(tenant.settings);
+    // A cell may hold the code or the label ("Permanent").
+    const categoryOf = (cell: string) =>
+      categories.find((c) => c.code === cell.toUpperCase().replace(/[\s-]+/g, '_') || c.label.toLowerCase() === cell.toLowerCase())?.code;
     const fixedSite = dto.siteId ? sites.find((s) => s.id === dto.siteId) : undefined;
     if (dto.siteId && !fixedSite) throw new AppError(400, 'SITE_NOT_FOUND', 'Unknown site');
     const codes = new Map(existing.map((e) => [e.employeeCode.toLowerCase(), e.id]));
@@ -326,7 +339,7 @@ export class EmployeesService {
       const dept = get('departmentName') ? departments.find((d) => d.name.toLowerCase() === get('departmentName').toLowerCase()) : null;
       const joinedOn = get('joinedOn');
       const mobilePunch = (get('mobilePunch') || 'NEVER').toUpperCase();
-      const employmentType = (get('employmentType') || 'FULL_TIME').toUpperCase().replace(/[\s-]+/g, '_');
+      const employmentType = get('employmentType') ? categoryOf(get('employmentType')) : categories[0].code;
       if (!code) fail('employeeCode', 'employeeCode is required');
       else if (code.length > 40) fail('employeeCode', 'employeeCode is longer than 40 characters');
       if (codes.has(code.toLowerCase())) fail('employeeCode', 'employeeCode already exists');
@@ -337,7 +350,7 @@ export class EmployeesService {
       if (get('departmentName') && !dept) fail('departmentName', `unknown department "${get('departmentName')}"`);
       if (!isRealYmd(joinedOn)) fail('joinedOn', 'joinedOn must be a real date as YYYY-MM-DD');
       if (!(MOBILE_PUNCH as readonly string[]).includes(mobilePunch)) fail('mobilePunch', `mobilePunch must be ${MOBILE_PUNCH.join(', ')}`);
-      if (!EMPLOYMENT_TYPES.includes(employmentType)) fail('employmentType', `employmentType must be ${EMPLOYMENT_TYPES.join(', ')}`);
+      if (!employmentType) fail('employmentType', `employmentType must be ${categories.map((c) => c.code).join(', ')}`);
       if (get('email') && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(get('email'))) fail('email', 'invalid email');
       if (get('phone').length > 30) fail('phone', 'phone is longer than 30 characters');
       return {

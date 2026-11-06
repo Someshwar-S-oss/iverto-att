@@ -12,7 +12,7 @@ const users = new Map(); // id -> {id,email,password,app_metadata,banned}
 const files = new Map();
 
 const token = (u) =>
-  new jose.SignJWT({ email: u.email, app_metadata: u.app_metadata, role: 'authenticated' })
+  new jose.SignJWT({ email: u.email, app_metadata: u.app_metadata, role: 'authenticated', aal: 'aal2' }) // as if the TOTP step was done
     .setProtectedHeader({ alg: 'RS256', kid: 'k1' })
     .setSubject(u.id).setIssuedAt().setExpirationTime('1h').setAudience('authenticated').sign(privateKey);
 

@@ -50,4 +50,15 @@ describe('plain-language audit', () => {
       { term: 'Note', value: 'ok' },
     ]);
   });
+
+  it('describes terminal keypad events in plain words', () => {
+    const p = { serialNo: 'DJ1', logId: 301, adminId: 0, terminalUserId: 0, action: 'EnterMenu', category: 'session', stat: '0', occurredAt: '2026-11-02T12:57:00Z' };
+    const e = entry('TERMINAL_ENTERMENU', p, { actorType: 'device', actorUserId: null });
+    expect(actionLabel(e.action)).toBe('Terminal menu opened');
+    expect(auditSentence(e, nameOf)).toBe('had its admin menu opened at the keypad');
+    expect(auditSentence(entry('TERMINAL_ENROLLUSERFACE', { ...p, terminalUserId: 7 }), nameOf)).toBe('had terminal user 7 enrolled at the keypad');
+    expect(auditSentence(entry('TERMINAL_UNKNOWN', { ...p, action: 'Unknown' }), nameOf)).toBe('reported “Unknown” at the keypad');
+    expect(actionLabel('TERMINAL_DELETED')).toBe('Attendance terminal removed');
+    expect(readableFields(p, nameOf, e.action).map((f) => f.term)).toEqual(['Terminal', 'Time on the terminal’s clock']);
+  });
 });

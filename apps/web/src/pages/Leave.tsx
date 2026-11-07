@@ -1,5 +1,5 @@
 import { Badge, Button, Callout, DataTable, DateInput, DescriptionList, EmptyState, ListFooter, Modal, PageHeader, PillTabs, Select, Textarea, TextField } from '@iverto-org/core-ui';
-import { Plus, SlidersHorizontal } from 'lucide-react';
+import { ExternalLink, Plus, SlidersHorizontal } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router';
 import { Crud } from '../components/Crud';
@@ -432,22 +432,33 @@ export function RemoteCheckIns() {
         <ListFooter count={list.rows.length} noun="check-ins" hasMore={Boolean(list.hasNextPage)} loadingMore={list.isFetchingNextPage} onLoadMore={() => void list.fetchNextPage()} />
       </Panel>
       {open && (
-        <Modal open onClose={() => setOpenId(null)} size="lg" title={`${open.employee?.fullName ?? 'Employee'} · check-${open.direction}`}
+        <Modal open onClose={() => setOpenId(null)} size="drawer" title={`${open.employee?.fullName ?? 'Employee'} · check-${open.direction}`}
           description={`${open.local} (UTC${open.offset})`}
           footer={<Decide path="/remote-work/punches" id={open.id} noun="Check-in" canDecide={canDecide(open)} />}>
-          <div className="grid gap-4 p-5 sm:grid-cols-2 sm:p-6">
-            {open.selfieUrl
-              ? <img src={open.selfieUrl} alt={`Selfie of ${open.employee?.fullName ?? 'employee'}`} className="aspect-[3/4] w-full rounded-lg object-cover" />
-              : <Callout tone="warning" title="No selfie">Removed after the photo retention period.</Callout>}
-            <div className="space-y-3">
-              <iframe title="Check-in location" className="aspect-square w-full rounded-lg border border-border"
-                src={`https://www.openstreetmap.org/export/embed.html?bbox=${open.lng - 0.004},${open.lat - 0.004},${open.lng + 0.004},${open.lat + 0.004}&layer=mapnik&marker=${open.lat},${open.lng}`} />
+          <div className="space-y-6 p-5 sm:p-6">
+            {open.isMockLocation && <Callout tone="danger" title="Mock location reported">The phone flagged this position as coming from a location-faking app. Check before approving.</Callout>}
+            <div className="grid gap-5 sm:grid-cols-[13rem_1fr]">
+              {open.selfieUrl
+                ? <a href={open.selfieUrl} target="_blank" rel="noreferrer"><img src={open.selfieUrl} alt={`Selfie of ${open.employee?.fullName ?? 'employee'}`} className="aspect-[3/4] w-full rounded-xl object-cover shadow-sm" /></a>
+                : <Callout tone="warning" title="No selfie">Removed after the photo retention period.</Callout>}
               <DescriptionList columns={1} items={[
-                { term: 'Location', value: <a className="underline" href={`https://www.google.com/maps?q=${open.lat},${open.lng}`} target="_blank" rel="noreferrer">{where(open)}</a> },
-                { term: 'GPS', value: open.isMockLocation ? <Badge tone="danger">Mock location reported</Badge> : 'Device location' },
-                { term: 'Review', value: <span><StatusBadge value={open.reviewStatus} map={REQUEST_STATUS} />{open.reviewNote ? ` ${open.reviewNote}` : ''}</span> },
+                { term: 'Status', value: <span className="flex flex-wrap items-center gap-2"><StatusBadge value={open.reviewStatus} map={REQUEST_STATUS} />{open.reviewNote && <span className="text-fg-muted">“{open.reviewNote}”</span>}</span> },
+                { term: 'Checked', value: open.direction === 'in' ? 'In' : 'Out' },
+                { term: 'Accuracy', value: open.accuracy != null ? `±${Math.round(open.accuracy)} m` : 'Not reported' },
+                { term: 'GPS', value: open.isMockLocation ? <Badge tone="danger">Mock location</Badge> : 'Device location' },
               ]} />
             </div>
+            <section className="space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-[11px] font-semibold uppercase tracking-wider text-fg-subtle">Location</h3>
+                <a className="inline-flex items-center gap-1 text-sm font-medium text-fg underline" href={`https://www.google.com/maps?q=${open.lat},${open.lng}`} target="_blank" rel="noreferrer">
+                  Open in Google Maps <ExternalLink size={14} />
+                </a>
+              </div>
+              <iframe title="Check-in location" className="h-[26rem] w-full rounded-xl border border-line"
+                src={`https://www.openstreetmap.org/export/embed.html?bbox=${open.lng - 0.006},${open.lat - 0.004},${open.lng + 0.006},${open.lat + 0.004}&layer=mapnik&marker=${open.lat},${open.lng}`} />
+              <p className="font-mono text-xs text-fg-muted">{where(open)}</p>
+            </section>
           </div>
         </Modal>
       )}

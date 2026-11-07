@@ -157,8 +157,23 @@ export function pageOf(url: unknown): string {
 }
 const METHOD: Record<string, string> = { GET: 'viewed', POST: 'made a change in', PATCH: 'edited something in', PUT: 'edited something in', DELETE: 'deleted something in' };
 
+/**
+ * Things done at a terminal's own keypad, recorded as `TERMINAL_<vendor action>`
+ * (see adminActionCategory in the API). Matched on the verb, like the API does.
+ */
+const slot = (p: Record<string, any>) => (Number(p.terminalUserId) > 0 ? `terminal user ${p.terminalUserId}` : 'a user');
+const KEYPAD: [RegExp, string, (p: Record<string, any>) => string][] = [
+  [/^ENTERMENU/, 'Terminal menu opened', () => 'had its admin menu opened at the keypad'],
+  [/^EXITMENU/, 'Terminal menu closed', () => 'had its admin menu closed at the keypad'],
+  [/^(DELETE|RESTORE$)/, 'Removed at a terminal', (p) => `had ${slot(p)} removed at the keypad`],
+  [/^ENROLL/, 'Enrolled at a terminal', (p) => `had ${slot(p)} enrolled at the keypad`],
+  [/^(SETTINGCHANGED|SETTIME|TZSET|MODIFYPERIOD)$/, 'Terminal setting changed', () => 'had a setting changed at the keypad'],
+];
+const isKeypad = (action: string) => action.startsWith('TERMINAL_') && !CATALOG[action];
+const keypad = (action: string) => (isKeypad(action) ? KEYPAD.find(([re]) => re.test(action.slice(9))) : undefined);
+
 /** Short label for an action code: "Leave approved". */
-export const actionLabel = (action: string) => CATALOG[action]?.[0] ?? humanize(action);
+export const actionLabel = (action: string) => CATALOG[action]?.[0] ?? keypad(action)?.[1] ?? (isKeypad(action) ? 'Terminal keypad activity' : humanize(action));
 /** Every known action, for the filter. */
 export const ACTION_OPTIONS = Object.entries(CATALOG).map(([value, [label]]) => ({ value, label })).sort((a, b) => a.label.localeCompare(b.label));
 
@@ -168,6 +183,7 @@ const payloadOf = (e: AuditEntry) => (e.payload && typeof e.payload === 'object'
 export function auditSentence(e: AuditEntry, nameOf: NameOf): string {
   const p = payloadOf(e);
   if (e.action === SUPPORT_ACCESS) return `${METHOD[String(p.method)] ?? 'opened'} ${pageOf(p.url)}`;
+  if (isKeypad(e.action)) return keypad(e.action)?.[2](p) ?? `reported “${p.action ?? e.action.slice(9)}” at the keypad`;
   const empId = typeof p.employeeId === 'string' ? p.employeeId : e.targetType === 'Employee' ? e.targetId : null;
   const ctx: Ctx = {
     p,
@@ -178,9 +194,20 @@ export function auditSentence(e: AuditEntry, nameOf: NameOf): string {
   return (entry ? entry[1](ctx) : humanize(e.action).toLowerCase()).replace(/\s+/g, ' ').trim();
 }
 
+/** Keypad events: only what a person can use; log ids, stat codes and the like stay in the technical view. */
+function keypadFields(p: Record<string, any>): { term: string; value: string }[] {
+  return [
+    { term: 'Terminal', value: String(p.serialNo ?? '—') },
+    { term: 'Time on the terminal’s clock', value: dateTime(typeof p.occurredAt === 'string' ? p.occurredAt : null) },
+    ...(Number(p.terminalUserId) > 0 ? [{ term: 'Terminal user', value: String(p.terminalUserId) }] : []),
+    ...(Number(p.adminId) > 0 ? [{ term: 'Done by terminal admin', value: String(p.adminId) }] : []),
+  ];
+}
+
 /** Payload as readable rows: ids become names (unknown ids are left to the technical view), dates read as dates. */
-export function readableFields(payload: unknown, nameOf: NameOf): { term: string; value: string }[] {
+export function readableFields(payload: unknown, nameOf: NameOf, action = ''): { term: string; value: string }[] {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return auditFields(payload);
+  if (isKeypad(action)) return keypadFields(payload as Record<string, any>);
   return Object.entries(payload).flatMap(([k, v]) => {
     if (k === 'method') return [];
     if (k === 'url') return [{ term: 'Page', value: pageOf(v) }];

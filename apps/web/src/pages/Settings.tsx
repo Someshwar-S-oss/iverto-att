@@ -323,7 +323,7 @@ function Audit() {
     const text = p.note ?? p.reason ?? p.decisionNote;
     return typeof text === 'string' && text ? `“${text}”` : '';
   };
-  const fields = open ? readableFields(open.first.payload, nameOf) : [];
+  const fields = open ? readableFields(open.first.payload, nameOf, open.first.action) : [];
   return (
     <div className="space-y-4">
       <div className="space-y-3">
@@ -360,7 +360,7 @@ function Audit() {
       {open && (
         <Modal open onClose={() => setOpen(null)} size="lg" title={open.rows.length > 1 ? 'Iverto support visit' : actionLabel(open.first.action)}
           description={dateTime(open.first.createdAt) ?? undefined}>
-          <div className="space-y-5">
+          <div className="space-y-5 p-5 sm:p-6">
             <p className="text-base text-fg"><span className="font-semibold">{who(open.first)}</span> {sentence(open)}.</p>
             {open.rows.length > 1 ? (
               <DescriptionList columns={1} items={[...open.rows].reverse().map((r) => ({ term: dateTime(r.createdAt) ?? '', value: pageOf((r.payload as { url?: string }).url) }))} />
